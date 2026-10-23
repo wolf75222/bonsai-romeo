@@ -39,6 +39,7 @@ public:
     std::string SIDEBAR_FOLDER_ICON;
     std::string SIDEBAR_FILE_ICON;
     std::string SIDEBAR_BACK_ICON;
+    std::string COLOR_MODE = "auto";
 
     std::array<int, 3> SIDEBAR_GROWTH_COLOR = {255, 175, 95};
     std::array<int, 3> SIDEBAR_SHRINK_COLOR = {95, 125, 255};
@@ -100,7 +101,7 @@ public:
         // Every field's key lives in fieldTable() exactly once; passthrough
         // fields get copied verbatim from the user's existing file.
         for (const auto& field : fieldTable()) {
-            if (field.passthrough) {
+            if (field.passthrough && !isLegacyIcon(userConfig, field.key)) {
                 copyValue(config, userConfig, field.key);
             }
         }
@@ -166,6 +167,29 @@ private:
         if (!fs::exists(config_path)) return writeDefaultConfig(config_path);
 
         return true;
+    }
+
+    /* Legacy icons
+    - Upstream's defaults are Nerd Font icons: their width depends on the terminal and the font,
+      which shifts the sidebar columns. A config still holding them gets the new ASCII defaults.
+    - Icons the user picked themselves are kept.
+    */
+    static bool isLegacyIconValue(const std::string& value) {
+        static const char* legacy[] = {"\"\uf07b\"", "\"\uf15b\"", "\"\uf114\"", "\"\uf4a5\"", "\"\uf0e2\""};
+        for (const char* l : legacy)
+            if (value == l) return true;
+        return false;
+    }
+
+    static bool isLegacyIcon(const std::string& source, const std::string& key) {
+        auto [start, len] = findValueSpan(source, key);
+        return start != std::string::npos && isLegacyIconValue(source.substr(start, len));
+    }
+
+    static std::string defaultValue(const std::string& key) {
+        const std::string defaults(reinterpret_cast<const char*>(bonsai_default), bonsai_default_len);
+        auto [start, len] = findValueSpan(defaults, key);
+        return start == std::string::npos ? "" : defaults.substr(start, len);
     }
 
     static void trim(std::string& s) {
@@ -296,6 +320,7 @@ private:
             {"CHART_DIM_FACTOR",                    makeSetter(&Config::CHART_DIM_FACTOR),                    true},
             {"ENABLE_FOLDER_SIZE_PERCENTAGES",      makeSetter(&Config::ENABLE_FOLDER_SIZE_PERCENTAGES),      true},
             {"SCANNER_THREADS",                     makeSetter(&Config::SCANNER_THREADS),                     true},
+            {"COLOR_MODE",                          makeSetter(&Config::COLOR_MODE),                          true},
         };
         return table;
     }
@@ -371,7 +396,7 @@ private:
                     // field table, so it's parsed separately.
                     cfg.CHART_COLORS = parseColorList(value, in);
                 } else if (const FieldSpec* field = findField(key)) {
-                    field->setter(cfg, value);
+                    field->setter(cfg, isLegacyIconValue(value) ? defaultValue(key) : value);
                 }
                 // Unknown keys are silently ignored, same as before.
             } catch (...) {

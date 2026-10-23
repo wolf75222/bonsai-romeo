@@ -12,6 +12,8 @@
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 #include <filesystem>
+#include <ftxui/screen/terminal.hpp>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -31,6 +33,46 @@
 */
 
 namespace fs = std::filesystem;
+
+/* Colors
+- FTXUI only uses 24 bit colors when COLORTERM says so, else it falls back to 256 colors.
+- SSH doesn't carry COLORTERM (ROMEO accepts no environment variable at all), so through SSH
+  the pie chart lost most of its shades, even in a terminal that has them.
+- "auto" therefore also picks truecolor for terminals known by their TERM, and for any SSH session
+  in an xterm-like terminal: nearly every terminal used to reach ROMEO handles 24 bit colors.
+- COLOR_MODE in the config, or BONSAI_COLOR, forces a mode.
+*/
+static void setupColors(std::string mode) {
+    using ftxui::Terminal::SetColorSupport;
+
+    if (const char* env = std::getenv("BONSAI_COLOR"); env && *env)
+        mode = env;
+
+    if (mode == "truecolor" || mode == "24bit") return SetColorSupport(ftxui::Terminal::Color::TrueColor);
+    if (mode == "256") return SetColorSupport(ftxui::Terminal::Color::Palette256);
+    if (mode == "16") return SetColorSupport(ftxui::Terminal::Color::Palette16);
+
+    auto env = [](const char* name) {
+        const char* value = std::getenv(name);
+        return std::string(value ? value : "");
+    };
+
+    const std::string colorterm = env("COLORTERM");
+    const std::string term = env("TERM");
+    const bool ssh = !env("SSH_CONNECTION").empty() || !env("SSH_TTY").empty();
+
+    if (colorterm == "truecolor" || colorterm == "24bit")
+        return SetColorSupport(ftxui::Terminal::Color::TrueColor);
+
+    for (const char* known : {"ghostty", "kitty", "wezterm", "alacritty", "foot", "direct", "iterm"})
+        if (term.find(known) != std::string::npos)
+            return SetColorSupport(ftxui::Terminal::Color::TrueColor);
+
+    if (ssh && term.find("xterm") != std::string::npos)
+        return SetColorSupport(ftxui::Terminal::Color::TrueColor);
+
+    // Otherwise FTXUI's own detection stays
+}
 
 int main(int argc, char* argv[]) {
     using namespace ftxui;
@@ -52,7 +94,8 @@ int main(int argc, char* argv[]) {
                          "  --summary   scan, print size and file count of each of your spaces, and exit\n"
                          "  --quota     print your GPFS quotas (space and files) with gauges, and exit\n"
                          "  BONSAI_ROOTS=dir1:dir2   override the detected spaces\n"
-                         "Keys: U quotas · F size / file count · R refresh quotas · D (or SUPPR) delete · ⌫/ESC up · Q quit\n";
+                         "  BONSAI_COLOR=truecolor|256|16   force the color mode (default: auto)\n"
+                         "Keys: U quotas, F size / file count, R refresh quotas, D (or SUPPR) delete, Backspace/ESC up, Q quit\n";
             return 0;
         } else {
             args.push_back(arg);
@@ -117,6 +160,8 @@ int main(int argc, char* argv[]) {
     }
 
     auto config = Config::get();
+    setupColors(config.COLOR_MODE);
+
     auto screen = ScreenInteractive::Fullscreen();
 
     // GPFS quotas, read in the background (key U)
@@ -212,7 +257,7 @@ int main(int argc, char* argv[]) {
 
     auto menu_component = BonsaiMenu::menu(&screen, data, &scanner, &selected, default_path, option);
     menu_component = CatchEvent(menu_component, [data, &scanner, &default_path, &show_confirm_modal](Event event) {
-        // Mac keyboards have no SUPPR key (their ⌫ is Backspace, which goes up a folder): D works everywhere
+        // Mac keyboards have no SUPPR key (their delete key is Backspace, which goes up a folder): D works everywhere
         if (event == Event::Delete || event == Event::Character('d') || event == Event::Character('D')) {
             show_confirm_modal = true;
             return true;
@@ -268,7 +313,7 @@ int main(int argc, char* argv[]) {
             text(" "),
             hbox({
                 text("Explorer") | bold,
-                text(files ? " · files" : " · size") | color(Color::GrayDark),
+                text(files ? " [files]" : " [size]") | color(Color::GrayDark),
                 text(" "),
                 BonsaiQuotaView::badge(quotas.get(), quotas.ready()),
             }) | center,
@@ -278,7 +323,7 @@ int main(int argc, char* argv[]) {
                 text(" ")
             }) | flex,
             separator(),
-            text(" U quotas · F size/files · D delete · Q quit") | color(Color::GrayDark),
+            text(" U quotas F files D delete Q quit") | color(Color::GrayDark),
         });
     });
 

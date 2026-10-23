@@ -64,14 +64,35 @@ public:
         return out;
     }
 
+    // Number of characters (code points) in an UTF-8 string
+    static size_t length(const std::string& str) {
+        size_t count = 0;
+        for (unsigned char c : str)
+            if ((c & 0xC0) != 0x80) count++;
+        return count;
+    }
+
+    // Byte offset of the character number `chars`, never in the middle of a multi-byte character
+    static size_t offsetOf(const std::string& str, size_t chars) {
+        size_t count = 0;
+        for (size_t i = 0; i < str.size(); i++) {
+            if ((static_cast<unsigned char>(str[i]) & 0xC0) != 0x80) {
+                if (count == chars) return i;
+                count++;
+            }
+        }
+        return str.size();
+    }
+
+    // Cuts at `max_size` characters (not bytes: "é" is two bytes), ending with `suffix`
     static std::string trimSuffix(const std::string& str, size_t max_size, const std::string& suffix) {
-        if (str.size() <= max_size)
+        if (length(str) <= max_size)
             return str;
 
         if (suffix.size() >= max_size)
             return suffix.substr(0, max_size);
 
         size_t cut = max_size - suffix.size();
-        return str.substr(0, cut) + suffix;
+        return str.substr(0, offsetOf(str, cut)) + suffix;
     }
 };

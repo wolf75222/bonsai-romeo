@@ -18,8 +18,8 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
     // This could also be made user-customizable
     int max_label_length = 5;
     std::string display_label = label;
-    if (display_label.length() > max_label_length) {
-        display_label = display_label.substr(0, max_label_length - 2) + "..";
+    if (FormatUtils::length(display_label) > static_cast<size_t>(max_label_length)) {
+        display_label = display_label.substr(0, FormatUtils::offsetOf(display_label, max_label_length - 2)) + "..";
     }
 
     const double start = start_deg * M_PI / 180.0;
@@ -44,7 +44,7 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
     // Precompute mid-angle and mid-radius for text
     const double mid_angle = start + (end - start) / 2.0;
     const double mid_radius = r_inner + (outer_r - r_inner) / 2.0;
-    const int text_x = (static_cast<int>(cx + std::cos(mid_angle) * mid_radius) - static_cast<int>(display_label.size()) / 2);
+    const int text_x = (static_cast<int>(cx + std::cos(mid_angle) * mid_radius) - static_cast<int>(FormatUtils::length(display_label)) / 2);
     const int text_y = static_cast<int>(cy + std::sin(mid_angle) * mid_radius);
 
     const int width = c.width();
@@ -497,7 +497,7 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
                 label += " files";
 
             // For some reason -4 centers text better
-            c.DrawText((w / 2 - label.size() / 2) - 4, h / 2, label);
+            c.DrawText((w / 2 - static_cast<int>(FormatUtils::length(label)) / 2) - 4, h / 2, label);
 
             // Scanner status
             if(!scanner->isDone()) {

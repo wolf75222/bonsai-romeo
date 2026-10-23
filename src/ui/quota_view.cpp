@@ -76,7 +76,7 @@ Element gauge(const Quota::Limit& limit) {
     Elements cells;
     for (int i = 0; i < BAR_WIDTH; i++) {
         if (i == marker)
-            cells.push_back(text("│") | bold | color(i < filled ? Color::White : Color::GrayLight) | bgcolor(i < filled ? fill : Color::GrayDark));
+            cells.push_back(text("|") | bold | color(i < filled ? Color::White : Color::GrayLight) | bgcolor(i < filled ? fill : Color::GrayDark));
         else if (i < filled)
             cells.push_back(text(" ") | bgcolor(fill));
         else
@@ -102,8 +102,8 @@ Element line(const std::string& label, const Quota::Limit& limit, bool bytes) {
 }
 
 std::string title(const Quota::Row& row) {
-    if (row.group) return row.name + " · project space · " + row.path;
-    return row.fileset + " · " + row.name + " · " + row.path;
+    if (row.group) return row.name + " - project space - " + row.path;
+    return row.fileset + " - " + row.name + " - " + row.path;
 }
 
 std::string ago(const Quota::Report& report) {
@@ -142,7 +142,7 @@ Element BonsaiQuotaView::badge(const Quota::Report& report, bool ready) {
     const Quota::State worst = report.worst();
     if (worst < Quota::State::NOTICE && report.stray_group.empty()) return text("");
 
-    const std::string label = worst >= Quota::State::GRACE ? " ⚠ quota " : " quota ";
+    const std::string label = worst >= Quota::State::GRACE ? " ! quota " : " quota ";
     return text(label) | bold | color(Color::Black) | bgcolor(stateColor(worst >= Quota::State::NOTICE ? worst : Quota::State::NOTICE));
 }
 
@@ -158,7 +158,7 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready) {
     content.push_back(hbox({
         text(" Quotas GPFS") | bold,
         filler(),
-        text("updated " + ago(report) + " · R refresh · U back to chart ") | color(Color::GrayDark),
+        text("updated " + ago(report) + " - R refresh - U back to chart ") | color(Color::GrayDark),
     }));
     content.push_back(text(" " + summary(report)) | bold | color(stateColor(report.worst() == Quota::State::NO_LIMIT ? Quota::State::OK : report.worst())));
     content.push_back(text(" "));
@@ -167,7 +167,7 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready) {
         if (!row.space.limited() && !row.inodes.limited()) {
             // The user quota on projet: counted on the project groups instead
             content.push_back(window(text(" " + title(row) + " "), vbox({
-                text(" " + FormatUtils::toReadable(row.space.used, " ") + " · " + FormatUtils::withSeparators(row.inodes.used) + " files") | bold,
+                text(" " + FormatUtils::toReadable(row.space.used, " ") + " - " + FormatUtils::withSeparators(row.inodes.used) + " files") | bold,
                 paragraph(" No individual limit here: what you put in a project counts on the project's quota (cards below).") | color(Color::GrayLight),
             })) | color(Color::GrayLight));
             continue;
@@ -189,10 +189,10 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready) {
     content.push_back(text(" "));
     content.push_back(hbox({
         text(" ") , text("  ") | bgcolor(stateColor(Quota::State::OK)), text(" fine  "),
-        text("  ") | bgcolor(stateColor(Quota::State::NOTICE)), text(" ≥85% of soft  "),
+        text("  ") | bgcolor(stateColor(Quota::State::NOTICE)), text(" >=85% of soft  "),
         text("  ") | bgcolor(stateColor(Quota::State::GRACE)), text(" over soft, grace running  "),
         text("  ") | bgcolor(stateColor(Quota::State::HARD)), text(" blocked  "),
-        text("│") | bold, text(" soft limit"),
+        text("|") | bold, text(" soft limit"),
     }) | color(Color::GrayLight));
     content.push_back(paragraph(" Soft limit: can be exceeded during the grace period, then writing is blocked. "
                                 "Hard limit: never exceeded. Files = inodes: every file or directory counts as one. "
@@ -252,6 +252,6 @@ std::string BonsaiQuotaView::toText(const Quota::Report& report, bool color) {
         out << "\n";
     }
 
-    out << "| = soft limit (grace period, then writing blocked) · bar end = hard limit · files = inodes\n";
+    out << "| = soft limit (grace period, then writing blocked) - bar end = hard limit - files = inodes\n";
     return out.str();
 }

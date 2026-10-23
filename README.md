@@ -15,6 +15,8 @@ What changes compared to upstream:
 - **File-count mode** (key `F`): the sidebar and the pie show how many files/directories each
   folder holds instead of its size, to find what eats your file quota.
 - **Deleting is limited to what you own**, inside your spaces.
+- Columns stay aligned in any terminal (ASCII icons, UTF-8 aware truncation), and the pie keeps its
+  24-bit colors through SSH.
 - `bonsai-romeo --summary [path]`: scan, print size and file count of each space, exit (no UI).
 - `BONSAI_ROOTS=dir1:dir2 bonsai-romeo` overrides the detected spaces.
 - Own config and cache (`~/.config/bonsai-romeo/`, `~/.cache/bonsai-romeo/`), no `xxd` needed to build.
@@ -69,6 +71,15 @@ On a Mac keyboard `âŒ«` is Backspace (go up), not delete: use `D` (or `fn` + `âŒ
   fail: the dashboard detects them and shows the `chgrp` commands to fix it.
 - The gauge is scaled to the hard limit, `|` marks the soft limit. Quota usage is counted in GPFS
   blocks, while the explorer shows apparent sizes (sum of file sizes): the two can differ.
+
+### Terminal compatibility
+
+- Icons are plain ASCII (`+` folder, `>` selection, `<` back), so the columns line up in every
+  terminal and font. Nerd Font icons can still be set in `~/.config/bonsai-romeo/bonsai.conf`.
+- Colors: through SSH the program can't tell whether your terminal supports 24-bit colors (ROMEO
+  doesn't receive `COLORTERM`). It assumes it does, as Ghostty, Warp, iTerm2, kitty, WezTerm and
+  recent macOS Terminal do. If the colors look wrong, use 256 colors:
+  `COLOR_MODE = "256"` in the config, or `BONSAI_COLOR=256 bonsai-romeo`.
 
 A full scan walks GPFS metadata and can take a couple of minutes; sizes fill in live.
 
