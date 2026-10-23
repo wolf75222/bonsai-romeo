@@ -4,6 +4,7 @@
 #include "../../include/utils/json.hpp"
 
 #include "../../include/ui/focus.hpp"
+#include "../../include/ui/theme.hpp"
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -32,11 +33,11 @@ bool keeps(int filter, const Scanner::CleanupItem& item) {
 }
 
 Color kindColor(const std::string& kind) {
-    if (kind == "old data" || kind == "old file") return Color::RGB(255, 140, 0);
-    if (kind == "many files") return Color::RGB(186, 85, 211);
-    if (kind == "core dump")  return Color::RGB(255, 70, 70);
-    if (kind == "large file") return Color::RGB(30, 144, 255);
-    return Color::RGB(60, 179, 113);
+    if (kind == "old data" || kind == "old file") return ui::theme::yellow();
+    if (kind == "many files") return ui::theme::magenta();
+    if (kind == "core dump")  return ui::theme::red();
+    if (kind == "large file") return ui::theme::blue();
+    return ui::theme::green();
 }
 
 // The thresholds O goes through
@@ -149,7 +150,7 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
             text(FormatUtils::trimMiddle(scope->display(item.path), pathWidth())) | flex,
         });
 
-        return entry.active ? row | bgcolor(Color::White) | color(Color::Black) : row;
+        return entry.active ? row | inverted : row;
     };
 
     option.on_enter = [state, on_open] {
@@ -161,37 +162,39 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
 
     auto view = Renderer(menu, [state, menu] {
         Element list = state->computing
-            ? text(" Looking for what could be cleaned...") | color(Color::GrayLight)
+            ? text(" Looking for what could be cleaned...") | dim
             : state->items.empty()
-            ? text(" Nothing to suggest: no cache, build folder, old data, folder of many files or large file found.") | color(Color::GrayLight)
+            ? text(" Nothing to suggest: no cache, build folder, old data, folder of many files or large file found.") | dim
             : menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 20);
 
         std::string hint;
         if (state->selected >= 0 && state->selected < static_cast<int>(state->items.size()))
             hint = state->items[state->selected].hint;
 
-        return vbox({
+        // The kinds, as tabs (TAB goes to the next one), the active one inverted
+        Elements tabs;
+        for (int i = 0; i < FILTER_COUNT; i++) {
+            const std::string name = " " + std::string(FILTERS[i]) + " ";
+            tabs.push_back(i == state->filter ? text(name) | inverted | bold : text(name) | dim);
+        }
+
+        return ui::overlay(ui::panel("Cleanup", vbox({
+            hbox({hbox(std::move(tabs)), filler(), text("old: " + ageName(state->old_days) + " ") | dim}),
+            state->partial ? text(" The scan is still running: more may show up, sizes may grow") | color(ui::theme::yellow()) : emptyElement(),
+            separator() | dim,
             hbox({
-                text(" Cleanup suggestions ") | bold,
-                text("[" + std::string(FILTERS[state->filter]) + "]  ") | color(Color::GrayLight),
-                text("old: " + ageName(state->old_days) + "  ") | color(Color::GrayDark),
-                filler(),
-                text(summary(state->items) + " ") | color(Color::GrayLight),
-            }),
-            state->partial ? text(" The scan is still running: more may show up, sizes may grow") | color(Color::RGB(255, 215, 0)) : emptyElement(),
-            separator(),
-            hbox({
-                text("Size") | size(WIDTH, EQUAL, 7),
-                text("Files") | size(WIDTH, EQUAL, 7),
-                text("Changed") | size(WIDTH, EQUAL, 8),
-                text("Kind") | size(WIDTH, EQUAL, 16),
-                text("Path"),
-            }) | color(Color::GrayDark),
+                text("SIZE") | size(WIDTH, EQUAL, 7),
+                text("FILES") | size(WIDTH, EQUAL, 7),
+                text("CHANGED") | size(WIDTH, EQUAL, 8),
+                text("KIND") | size(WIDTH, EQUAL, 16),
+                text("PATH"),
+            }) | dim,
             list,
-            separator(),
+            separator() | dim,
             paragraph(" " + hint),
-            text(" ENTER open (then D delete, T pack)   TAB kind   O age   ESC close") | color(Color::GrayDark),
-        }) | border | size(WIDTH, LESS_THAN, 120);
+            hbox({text(" "), ui::keyHints({{"enter", "open"}, {"tab", "kind"}, {"o", "age"}, {"esc", "close"}}),
+                  text("(then d deletes, t packs)") | dim}),
+        }), ui::theme::accent(), text(summary(state->items)) | dim) | size(WIDTH, LESS_THAN, 122));
     });
 
     return keepFocus(CatchEvent(view, [state, on_close, on_age](Event event) {

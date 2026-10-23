@@ -13,6 +13,7 @@
 #include "../include/ui/help_view.hpp"
 #include "../include/ui/progress_view.hpp"
 #include "../include/ui/search_view.hpp"
+#include "../include/ui/theme.hpp"
 #include "../include/utils/format.hpp"
 #include "../include/utils/json.hpp"
 
@@ -310,8 +311,24 @@ int main(int argc, char* argv[]) {
     bool show_errors = false;
 
     Scanner scanner = Scanner(default_path, db_path, scope);
-    std::thread scanner_thread([&scanner, &screen]() {
+    // Who, for the title bar: user@host
+    std::string who;
+    {
+        char host[256] = {0};
+        gethostname(host, sizeof(host) - 1);
+        std::string name(host);
+        name = name.substr(0, name.find('.'));
+        // $USER first, as the shell knows it (and as RSV shows it)
+        const char* user = std::getenv("USER");
+        const passwd* pw = getpwuid(getuid());
+        who = std::string(user && *user ? user : pw ? pw->pw_name : "") + "@" + name;
+    }
+
+    // When the scan ended (seconds since 1970, 0 while it runs): the title bar says how fresh the sizes are
+    std::atomic<int64_t> scanned_at{0};
+    std::thread scanner_thread([&scanner, &screen, &scanned_at]() {
         scanner.scan();
+        scanned_at = std::time(nullptr);
         scanner.snapshot();
         screen.PostEvent(Event::Custom);
     });
@@ -975,18 +992,16 @@ int main(int argc, char* argv[]) {
     auto pie_component = BonsaiPie::pie(data, &scanner, default_path);
     std::thread pie_thread(BonsaiPie::worker, &screen, data, &scanner, default_path);
 
+    /* Explorer, on the left: the list in a panel (the look of RSV, see theme.hpp)
+    - Its frame says what F and S show when it isn't the usual, then where the explorer is (nothing at the top)
+    - Under the list, only what concerns it: the marks, the folders that couldn't be read
+    */
     auto left = Renderer(menu_container, [&] {
         std::lock_guard<std::mutex> lock_m(data->menu_mutex);
 
         const Scanner::Metric metric = scanner.getMetric();
         const AppData::Sort sort = data->sort.load();
-
-        /* Header: the title, with what F and S show when it isn't the usual, then where the explorer is
-        - At the top (your spaces) the list says it all: no path
-        - What runs and what happened go at the bottom, the keys are in ? (one line of the main ones)
-        */
-        const std::string here = scanner.isSpacesView(*data->path) ? "" : scope.display(*data->path);
-        const size_t width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
+        const size_t width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 4, 8));
 
         std::string shown;
         auto tag = [&shown](const char* what) { shown += (shown.empty() ? "" : ", ") + std::string(what); };
@@ -995,67 +1010,84 @@ int main(int argc, char* argv[]) {
         if (sort == AppData::Sort::NAME) tag("by name");
         if (sort == AppData::Sort::AGE) tag("oldest first");
 
-        // A quota needing attention turns the U of the keys line orange: the one place it shows
-        const bool quota_alert = !BonsaiQuotaView::badgeText(quotas.get(), quotas.ready()).empty();
+        std::string where = scanner.isSpacesView(*data->path) ? "" : scope.display(*data->path);
+        if (!shown.empty())
+            where = shown + (where.empty() ? "" : " · " + where);
+        const size_t room = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 16, 4));
 
-        Elements bottom;
-
-        // A job whose window is hidden (P shows it), or what just happened, for a few seconds
-        if (job_running && !show_progress) {
-            std::string busy = job_label;
-            if (progress_job.progress) {
-                if (const std::string done = BonsaiProgress::percent(*progress_job.progress); !done.empty())
-                    busy += "  " + done;
-            }
-            bottom.push_back(text(" " + FormatUtils::trimMiddle(busy + "  (P)", width)) | color(Color::GrayLight));
-        } else if (!notice.empty() && std::chrono::steady_clock::now() < notice_until) {
-            bottom.push_back(text(" " + FormatUtils::trimMiddle(notice, width)) | color(Color::RGB(60, 179, 113)));
-        }
+        Elements rows = {menu_component->Render() | frame | flex};
 
         // Marked entries (SPACE): what D would delete
         if (!marks_line.empty())
-            bottom.push_back(text(FormatUtils::trimSuffix(marks_line, width + 1, "...")) | color(Color::RGB(255, 215, 0)));
+            rows.push_back(text(FormatUtils::trimSuffix(marks_line, width + 1, "...")) | color(ui::theme::yellow()));
 
         // Folders that couldn't be read: the sizes above them may be low
-        if (const uint32_t errors = scanner.readErrorCount(); errors > 0) {
-            bottom.push_back(text(" ! " + std::to_string(errors) + (errors == 1 ? " unreadable folder (!)" : " unreadable folders (!)"))
-                             | color(Color::RGB(255, 140, 0)));
+        if (const uint32_t errors = scanner.readErrorCount(); errors > 0)
+            rows.push_back(text(" ! " + std::to_string(errors) + (errors == 1 ? " unreadable folder (!)" : " unreadable folders (!)")) | color(ui::theme::yellow()));
+
+        return ui::panel("Explorer", vbox(std::move(rows)), ui::theme::accent(),
+                         where.empty() ? nullptr : text(FormatUtils::trimMiddle(where, room)) | dim);
+    });
+
+    /* On the right: the chart of the folder shown, in a panel titled with the selected entry and what it holds
+    - Or the quotas (U)
+    */
+    auto right = Renderer(pie_component, [&] {
+        const int width = std::max(ftxui::Terminal::Size().dimx - config.SIDEBAR_WIDTH - 1, 20);
+
+        if (show_quota) {
+            const Quota::Report report = quotas.get();
+            std::string fresh;
+            if (quotas.ready()) {
+                const auto age = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - report.fetched_at).count();
+                fresh = age < 5 ? "updated now" : "updated " + FormatUtils::toDuration(static_cast<double>(age)) + " ago";
+            }
+            return ui::panel("Quotas", BonsaiQuotaView::render(report, quotas.ready(), width - 2, scanner.getScope(),
+                                                               [&scanner](const std::string& root) { return scanner.totals(root); }) | flex,
+                             ui::theme::accent(), text(fresh) | dim);
         }
 
-        bottom.push_back(separator());
-        bottom.push_back(hbox({
-            text(" ? keys  / find  C clean  ") | color(Color::GrayDark),
-            text("U quota") | color(quota_alert ? Color::RGB(255, 140, 0) : Color::GrayDark),
-        }));
+        // The selected entry: its name, and its size, files and last change in the frame
+        std::string title = "Chart";
+        std::string details;
+        {
+            std::lock_guard<std::mutex> lock(data->menu_mutex);
+            if (selected >= 0 && selected < static_cast<int>(data->menu_entries->size())) {
+                const auto& entry = (*data->menu_entries)[selected];
+                if (entry.label == "..") {
+                    title = fs::path(*data->path).filename().string();
+                } else {
+                    title = entry.label;
+                    if (!entry.known) {
+                        details = "not scanned (R scans it)";
+                    } else {
+                        const Scanner::Totals t = entry.is_dir ? scanner.totals(entry.path) : Scanner::Totals{};
+                        details = (entry.final ? "" : "~") + scanner.format(entry.size, " ");
+                        if (entry.is_dir && scanner.getMetric() != Scanner::Metric::INODES)
+                            details += " · " + FormatUtils::toCount(t.inodes) + " files";
+                        if (entry.newest > 0)
+                            details += " · " + FormatUtils::toAgeShort(std::time(nullptr) - entry.newest);
+                        if (entry.error)
+                            details += " · ! unreadable inside";
+                    }
+                }
+            }
+        }
 
-        Elements rows = {
-            text(" "),
-            hbox({
-                text("Explorer") | bold,
-                text(shown.empty() ? "" : " [" + shown + "]") | color(Color::GrayDark),
-            }) | center,
-            text(" " + FormatUtils::trimMiddle(here, width)) | color(Color::GrayLight),
-            separator(),
-            hbox({
-                menu_component->Render() | frame | flex,
-                text(" ")
-            }) | flex,
-        };
-        rows.insert(rows.end(), bottom.begin(), bottom.end());
-
-        return vbox(std::move(rows));
+        const size_t room = static_cast<size_t>(std::max(width - 8, 8));
+        const std::string shown_title = FormatUtils::trimMiddle(title, std::min<size_t>(room / 2, 40));
+        return ui::panel(shown_title, pie_component->Render() | flex, ui::theme::gray(),
+                         details.empty() ? nullptr : text(FormatUtils::trimMiddle(details, room - shown_title.size())) | dim);
     });
 
-    // Right side: the pie chart, or the quotas
-    auto right = Renderer(pie_component, [&] {
-        if (show_quota)
-            return BonsaiQuotaView::render(quotas.get(), quotas.ready(), ftxui::Terminal::Size().dimx - config.SIDEBAR_WIDTH - 1,
-                                           scanner.getScope(), [&scanner](const std::string& root) { return scanner.totals(root); });
-
-        return pie_component->Render();
-    });
-
-    auto window = ResizableSplitLeft(left, right, &config.SIDEBAR_WIDTH);
+    // Side by side; the gap between the two panels is the handle the mouse resizes them with
+    ResizableSplitOption split;
+    split.main = left;
+    split.back = right;
+    split.direction = Direction::Left;
+    split.main_size = &config.SIDEBAR_WIDTH;
+    split.separator_func = [] { return text(" "); };
+    auto window = ResizableSplit(split);
 
     // Opens `folder` itself in the explorer, at its first entry (never above where the explorer starts)
     auto open_folder = [&](const std::string& folder) {
@@ -1413,7 +1445,58 @@ int main(int argc, char* argv[]) {
             data->cv.notify_all();
         }
 
-        return app->Render();
+        /* Title bar, as in RSV: the name, who, and how fresh the sizes are
+        - Keys line at the bottom: as many keys as fit, the most useful first; a message takes its place a moment
+        */
+        const int columns = ftxui::Terminal::Size().dimx;
+        std::string fresh;
+        if (const int64_t at = scanned_at.load(); at == 0)
+            fresh = "scanning · " + FormatUtils::toCount(scanner.directories()) + " folders";
+        else if (const int64_t age = std::time(nullptr) - at; age < 60)
+            fresh = "scanned now";
+        else
+            fresh = "scanned " + FormatUtils::toAge(age) + " ago";
+
+        Element title_bar = hbox({
+            text(" bonsai ") | bold | inverted | color(ui::theme::accent()),
+            text(" " + who + " ") | dim,
+            filler(),
+            text(fresh + " ") | dim,
+        });
+
+        Element keys;
+        if (job_running && !show_progress) {
+            std::string busy = job_label;
+            if (progress_job.progress) {
+                if (const std::string done = BonsaiProgress::percent(*progress_job.progress); !done.empty())
+                    busy += "  " + done;
+            }
+            keys = hbox({text(" "), text(FormatUtils::trimMiddle(busy, static_cast<size_t>(std::max(columns - 20, 8)))) | color(ui::theme::accent()),
+                         text("  "), ui::keyHint("p", "show")});
+        } else if (!notice.empty() && std::chrono::steady_clock::now() < notice_until) {
+            keys = hbox({text(" "), text(FormatUtils::trimMiddle(notice, static_cast<size_t>(std::max(columns - 2, 8)))) | color(ui::theme::green())});
+        } else {
+            // A quota needing attention turns its key yellow (red once writing is blocked)
+            const Quota::Report report = quotas.get();
+            const bool alert = !BonsaiQuotaView::badgeText(report, quotas.ready()).empty();
+            const ftxui::Color quota_color = !alert ? ui::theme::accent() : report.worst() >= Quota::State::EXPIRED ? ui::theme::red() : ui::theme::yellow();
+
+            static const std::vector<std::pair<std::string, std::string>> all = {
+                {"?", "help"}, {"q", "quit"}, {"/", "find"}, {"c", "clean"}, {"u", "quota"}, {"f", "size"}, {"s", "sort"},
+                {"space", "mark"}, {"d", "delete"}, {"t", "pack"}, {"w", "grew"}, {"r", "rescan"}, {"y", "copy"}, {"a", "age"}};
+            Elements hints = {text(" ")};
+            int used = 1;
+            for (const auto& [key, label] : all) {
+                const int w = static_cast<int>(key.size() + 1 + label.size() + 2);
+                if (used + w > columns)
+                    break;
+                hints.push_back(key == "u" ? ui::keyHint(key, alert ? label + " !" : label, quota_color) : ui::keyHint(key, label));
+                used += w + (key == "u" && alert ? 2 : 0);
+            }
+            keys = hbox(std::move(hints));
+        }
+
+        return vbox({title_bar, app->Render() | flex, keys});
     });
 
     /* Hangup watchdog

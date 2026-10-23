@@ -1,6 +1,7 @@
 #include "../../include/ui/progress_view.hpp"
 
 #include "../../include/ui/focus.hpp"
+#include "../../include/ui/theme.hpp"
 #include "../../include/utils/format.hpp"
 
 #include <ftxui/component/event.hpp>
@@ -45,20 +46,15 @@ Component BonsaiProgress::window(const Job* job, const UserScope* scope,
         if (job->finished) {
             const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - p.started).count();
             const int width = windowWidth();
-            return vbox({
-                hbox({
-                    text(" " + FormatUtils::trimMiddle(job->title, static_cast<size_t>(width - 16)) + " ") | bold,
-                    filler(),
-                    text(FormatUtils::toDuration(elapsed) + " ") | color(Color::GrayLight),
-                }),
-                text(" Done") | color(Color::RGB(60, 179, 113)),
+            return ui::overlay(ui::panel(FormatUtils::trimMiddle(job->title, static_cast<size_t>(width - 20)), vbox({
+                text(" Done") | color(ui::theme::green()),
                 text(""),
-                hbox({text(" "), gauge(1.0f) | color(Color::RGB(60, 179, 113)) | flex, text(" 100% ") | bold}),
+                hbox({text(" "), gauge(1.0f) | color(ui::theme::green()) | flex, text(" 100% ") | bold}),
                 paragraph(" " + job->result),
                 text(""),
-                separator(),
-                text(" ESC close") | color(Color::GrayDark),
-            }) | border | size(WIDTH, EQUAL, width);
+                separator() | dim,
+                hbox({text(" "), ui::keyHints({{"esc", "close"}})}),
+            }), ui::theme::green(), text(FormatUtils::toDuration(elapsed)) | dim) | size(WIDTH, EQUAL, width));
         }
 
         const uint64_t done = p.done.load();
@@ -69,12 +65,7 @@ Component BonsaiProgress::window(const Job* job, const UserScope* scope,
         const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - p.started).count();
 
         Elements rows;
-        rows.push_back(hbox({
-            text(" " + FormatUtils::trimMiddle(job->title, static_cast<size_t>(width - 16)) + " ") | bold,
-            filler(),
-            text(FormatUtils::toDuration(elapsed) + " ") | color(Color::GrayLight),
-        }));
-        rows.push_back(text(" " + p.stepName() + (stopping ? ": stopping..." : "")) | color(stopping ? Color::RGB(255, 140, 0) : Color::GrayLight));
+        rows.push_back(text(" " + p.stepName() + (stopping ? ": stopping..." : "")) | (stopping ? color(ui::theme::yellow()) : dim));
         rows.push_back(text(""));
 
         // The bar, when the scan says how many entries there are
@@ -82,13 +73,13 @@ Component BonsaiProgress::window(const Job* job, const UserScope* scope,
             const double ratio = ratioOf(done, total);
             rows.push_back(hbox({
                 text(" "),
-                gauge(static_cast<float>(ratio)) | color(Color::RGB(60, 179, 113)) | flex,
+                gauge(static_cast<float>(ratio)) | color(ui::theme::green()) | flex,
                 text(" " + std::to_string(static_cast<int>(ratio * 100)) + "% ") | bold,
             }));
 
             std::string amount = FormatUtils::withSeparators(done) + " / " + FormatUtils::withSeparators(std::max(done, total)) + " entries";
             if (job->deleting && p.disk.load() > 0)
-                amount += "   ~" + FormatUtils::toReadable(static_cast<uint64_t>(static_cast<double>(p.disk.load()) * ratio), " ")
+                amount += " · ~" + FormatUtils::toReadable(static_cast<uint64_t>(static_cast<double>(p.disk.load()) * ratio), " ")
                         + " of " + FormatUtils::toReadable(p.disk.load(), " ") + " freed";
             rows.push_back(text(" " + amount));
         } else if (p.checked.load() > 0 && done == 0) {
@@ -103,21 +94,24 @@ Component BonsaiProgress::window(const Job* job, const UserScope* scope,
             const double rate = static_cast<double>(done) / seconds;
             pace = " " + FormatUtils::toCount(static_cast<uint64_t>(rate)) + " per second";
             if (total > done)
-                pace += "   about " + FormatUtils::toDuration(static_cast<double>(total - done) / rate) + " left";
+                pace += " · about " + FormatUtils::toDuration(static_cast<double>(total - done) / rate) + " left";
         }
-        rows.push_back(text(pace) | color(Color::GrayLight));
+        rows.push_back(text(pace) | dim);
 
         // The entries it is on, live
-        rows.push_back(separator());
+        rows.push_back(separator() | dim);
         const std::vector<std::string> recent = p.recent(RECENT);
         for (size_t i = 0; i < RECENT; i++) {
             const std::string line = i < recent.size() ? " " + FormatUtils::trimMiddle(scope->display(recent[i]), static_cast<size_t>(width - 4)) : " ";
-            rows.push_back(text(line) | color(i == 0 ? Color::White : Color::GrayDark));
+            rows.push_back(i == 0 ? text(line) : text(line) | dim);
         }
-        rows.push_back(separator());
-        rows.push_back(text(stopping ? " ESC hide" : " ESC hide (it keeps going)   S stop (what is done stays done)") | color(Color::GrayDark));
+        rows.push_back(separator() | dim);
+        rows.push_back(hbox({text(" "), stopping ? ui::keyHints({{"esc", "hide"}})
+                                                 : ui::keyHints({{"esc", "hide (it keeps going)"}, {"s", "stop (what is done stays done)"}})}));
 
-        return vbox(std::move(rows)) | border | size(WIDTH, EQUAL, width);
+        return ui::overlay(ui::panel(FormatUtils::trimMiddle(job->title, static_cast<size_t>(width - 20)), vbox(std::move(rows)),
+                                     stopping ? ui::theme::yellow() : ui::theme::accent(), text(FormatUtils::toDuration(elapsed)) | dim)
+                           | size(WIDTH, EQUAL, width));
     });
 
     return keepFocus(CatchEvent(view, [on_hide, on_stop](Event event) {

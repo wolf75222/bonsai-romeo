@@ -1,4 +1,5 @@
 #include "../../include/ui/modal_error.hpp"
+#include "../../include/ui/theme.hpp"
 
 #include <algorithm>
 
@@ -13,20 +14,17 @@ Component BonsaiModalError::error(const std::string* title, const std::string* m
         size_t start = 0;
         while (start <= message->size()) {
             const size_t end = std::min(message->find('\n', start), message->size());
-            lines.push_back(paragraph(" " + message->substr(start, end - start) + " ") | color(Color::IndianRed));
+            lines.push_back(paragraph(" " + message->substr(start, end - start) + " "));
             start = end + 1;
         }
 
-        return vbox({
-            text(""),
-            text(*title) | bold | center,
+        return ui::overlay(ui::panel(*title, vbox({
             text(""),
             vbox(std::move(lines)),
             text(""),
             inner | center,
             text(""),
-
-        }) | size(WIDTH, GREATER_THAN, 70) | size(WIDTH, LESS_THAN, 110) | border;
+        }) | size(WIDTH, GREATER_THAN, 70) | size(WIDTH, LESS_THAN, 110), ui::theme::red()));
     });
     return component;
 }

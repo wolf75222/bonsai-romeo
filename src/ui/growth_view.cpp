@@ -4,6 +4,7 @@
 #include "../../include/utils/format.hpp"
 
 #include "../../include/ui/focus.hpp"
+#include "../../include/ui/theme.hpp"
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -55,13 +56,13 @@ Component BonsaiGrowth::window(std::shared_ptr<State> state, Scanner* scanner,
         const int64_t now = static_cast<int64_t>(state->files ? item.now.inodes : scanner->value(item.now));
 
         auto row = hbox({
-            text("+" + amount(item.delta, state->files)) | color(Config::growthColor()) | size(WIDTH, EQUAL, 8),
+            text("+" + amount(item.delta, state->files)) | color(ui::theme::yellow()) | size(WIDTH, EQUAL, 8),
             text(amount(now, state->files)) | size(WIDTH, EQUAL, 7),
-            text(item.is_new ? "new" : "") | color(Color::RGB(60, 179, 113)) | size(WIDTH, EQUAL, 5),
+            text(item.is_new ? "new" : "") | color(ui::theme::green()) | size(WIDTH, EQUAL, 5),
             text(FormatUtils::trimMiddle(scanner->getScope().display(item.path), pathWidth())) | flex,
         });
 
-        return entry.active ? row | bgcolor(Color::White) | color(Color::Black) : row;
+        return entry.active ? row | inverted : row;
     };
 
     option.on_enter = [state, on_open] {
@@ -77,36 +78,30 @@ Component BonsaiGrowth::window(std::shared_ptr<State> state, Scanner* scanner,
 
         Element list;
         if (state->computing)
-            list = text(" Comparing with the previous scan...") | color(Color::GrayLight);
+            list = text(" Comparing with the previous scan...") | dim;
         else if (state->since == 0)
-            list = paragraph(" No previous scan to compare with: run bonsai-romeo again later, this will list what grew in between.") | color(Color::GrayLight);
+            list = paragraph(" No previous scan to compare with: run bonsai-romeo again later, this will list what grew in between.") | dim;
         else if (state->items.empty())
-            list = paragraph(" No folder grew by " + least + " or more since the previous scan.") | color(Color::GrayLight);
+            list = paragraph(" No folder grew by " + least + " or more since the previous scan.") | dim;
         else
             list = menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 20);
 
-        const std::string since = state->since > 0 ? " since the previous scan, " + FormatUtils::toAge(state->now - state->since) + " ago" : "";
+        const std::string since = state->since > 0 ? FormatUtils::toAge(state->now - state->since) + " ago" : "";
 
-        return vbox({
+        return ui::overlay(ui::panel("Grown since the previous scan", vbox({
+            state->partial ? text(" The scan is still running: folders show up once scanned") | color(ui::theme::yellow()) : emptyElement(),
             hbox({
-                text(" Grown" + since + " ") | bold,
-                text("[" + unit + "]  ") | color(Color::GrayLight),
-                filler(),
-                text(std::to_string(state->items.size()) + " folders ") | color(Color::GrayLight),
-            }),
-            state->partial ? text(" The scan is still running: folders show up once scanned") | color(Color::RGB(255, 215, 0)) : emptyElement(),
-            separator(),
-            hbox({
-                text("Grown") | size(WIDTH, EQUAL, 8),
-                text("Now") | size(WIDTH, EQUAL, 7),
+                text("GROWN") | size(WIDTH, EQUAL, 8),
+                text("NOW") | size(WIDTH, EQUAL, 7),
                 text("") | size(WIDTH, EQUAL, 5),
-                text("Path"),
-            }) | color(Color::GrayDark),
+                text("PATH"),
+            }) | dim,
             list,
-            separator(),
-            paragraph(" Net growth, where it happened: a folder that grew mostly in one sub-folder shows that sub-folder. F switches to files or size.") | color(Color::GrayDark),
-            text(" ENTER open in the explorer   ESC close") | color(Color::GrayDark),
-        }) | border | size(WIDTH, LESS_THAN, 120);
+            separator() | dim,
+            paragraph(" Net growth, where it happened: a folder that grew mostly in one sub-folder shows that sub-folder.") | dim,
+            hbox({text(" "), ui::keyHints({{"enter", "open"}, {"f", "files / size"}, {"esc", "close"}})}),
+        }), ui::theme::accent(), text(unit + (since.empty() ? "" : " · previous scan " + since) + " · " + std::to_string(state->items.size()) + " folders") | dim)
+            | size(WIDTH, LESS_THAN, 122));
     });
 
     return keepFocus(CatchEvent(view, [on_close](Event event) {

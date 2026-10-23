@@ -3,6 +3,7 @@
 #include "../../include/utils/format.hpp"
 
 #include "../../include/ui/focus.hpp"
+#include "../../include/ui/theme.hpp"
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -70,11 +71,11 @@ Component BonsaiErrors::window(std::shared_ptr<State> state, const UserScope* sc
 
         const auto& e = state->errors[entry.index];
         auto row = hbox({
-            text(FormatUtils::trimSuffix(message(e.error), 24, "...")) | color(Color::RGB(255, 140, 0)) | size(WIDTH, EQUAL, 26),
+            text(FormatUtils::trimSuffix(message(e.error), 24, "...")) | color(ui::theme::yellow()) | size(WIDTH, EQUAL, 26),
             text(FormatUtils::trimMiddle(scope->display(e.path), pathWidth())) | flex,
         });
 
-        return entry.active ? row | bgcolor(Color::White) | color(Color::Black) : row;
+        return entry.active ? row | inverted : row;
     };
 
     option.on_enter = [state, on_open] {
@@ -91,20 +92,15 @@ Component BonsaiErrors::window(std::shared_ptr<State> state, const UserScope* sc
 
         const std::string count = std::to_string(state->total) + (state->total == 1 ? " folder" : " folders");
 
-        return vbox({
-            hbox({
-                text(" Folders that couldn't be read ") | bold,
-                filler(),
-                text(count + " ") | color(Color::GrayLight),
-            }),
-            paragraph(" What they hold isn't counted: the sizes above them (marked !) may be too low.") | color(Color::GrayLight),
-            separator(),
-            state->errors.empty() ? text(" None.") | color(Color::GrayLight)
+        return ui::overlay(ui::panel("Folders that couldn't be read", vbox({
+            paragraph(" What they hold isn't counted: the sizes above them (marked !) may be too low.") | dim,
+            separator() | dim,
+            state->errors.empty() ? text(" None.") | dim
                                   : menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 16),
-            separator(),
+            separator() | dim,
             paragraph(" " + hint),
-            text(" ENTER open in the explorer   ESC close") | color(Color::GrayDark),
-        }) | border | size(WIDTH, LESS_THAN, 110);
+            hbox({text(" "), ui::keyHints({{"enter", "open"}, {"esc", "close"}})}),
+        }), ui::theme::yellow(), text(count) | dim) | size(WIDTH, LESS_THAN, 112));
     });
 
     return keepFocus(CatchEvent(view, [on_close](Event event) {

@@ -1,5 +1,6 @@
 #include "../../include/ui/search_view.hpp"
 
+#include "../../include/ui/theme.hpp"
 #include "../../include/utils/format.hpp"
 
 #include <ftxui/component/event.hpp>
@@ -126,7 +127,7 @@ Component BonsaiSearch::window(std::shared_ptr<State> state, Worker* worker, Sca
             });
 
             // `focus` keeps the selected row in view when the list scrolls
-            rows.push_back(static_cast<int>(i) == state->selected ? row | bgcolor(Color::White) | color(Color::Black) | focus : row);
+            rows.push_back(static_cast<int>(i) == state->selected ? row | inverted | focus : row);
         }
 
         std::string count;
@@ -139,28 +140,23 @@ Component BonsaiSearch::window(std::shared_ptr<State> state, Worker* worker, Sca
 
         Element list = rows.empty()
             ? paragraph(state->query.empty() ? " Type a folder name. Words are searched in the path, the last one in the folder name: \"adc build\" finds the build folders under adc..."
-                                             : (state->searching ? " " : " No folder of yours matches.")) | color(Color::GrayLight)
+                                             : (state->searching ? " " : " No folder of yours matches.")) | dim
             : vbox(std::move(rows)) | vscroll_indicator | yframe | size(HEIGHT, LESS_THAN, 20);
 
-        return vbox({
+        return ui::overlay(ui::panel("Search folders", vbox({
+            hbox({text(" / ") | bold | color(ui::theme::accent()), input->Render() | flex}),
+            state->partial ? text(" The scan is still running: more may show up") | color(ui::theme::yellow()) : emptyElement(),
+            separator() | dim,
             hbox({
-                text(" Search folders ") | bold,
-                filler(),
-                text(count + " ") | color(Color::GrayLight),
-            }),
-            hbox({text(" / ") | bold, input->Render() | flex}),
-            state->partial ? text(" The scan is still running: more may show up") | color(Color::RGB(255, 215, 0)) : emptyElement(),
-            separator(),
-            hbox({
-                text("Size") | size(WIDTH, EQUAL, 7),
-                text("Files") | size(WIDTH, EQUAL, 7),
-                text("Changed") | size(WIDTH, EQUAL, 8),
-                text("Path"),
-            }) | color(Color::GrayDark),
+                text("SIZE") | size(WIDTH, EQUAL, 7),
+                text("FILES") | size(WIDTH, EQUAL, 7),
+                text("CHANGED") | size(WIDTH, EQUAL, 8),
+                text("PATH"),
+            }) | dim,
             list,
-            separator(),
-            text(" ENTER open in the explorer   UP/DOWN select   ESC close") | color(Color::GrayDark),
-        }) | border | size(WIDTH, LESS_THAN, 120);
+            separator() | dim,
+            hbox({text(" "), ui::keyHints({{"enter", "open"}, {"up/down", "select"}, {"esc", "close"}})}),
+        }), ui::theme::accent(), text(count) | dim) | size(WIDTH, LESS_THAN, 122));
     });
 
     return CatchEvent(view, [state, on_open, on_close](Event event) {

@@ -2,6 +2,7 @@
 #include "../../include/ui/listing.hpp"
 
 #include "../../include/config/config.hpp"
+#include "../../include/ui/theme.hpp"
 #include "../../include/utils/format.hpp"
 
 #include <ftxui/dom/elements.hpp>
@@ -332,7 +333,8 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
           the columns used to keep their first size and got cut when the sidebar was made narrower
         - Fixed widths that always add up to the sidebar (minus its right margin), so every row lines up
         */
-        const int width = std::max(*sidebar_width - 1, 12);
+        // Inside the panel's frame (two columns), one column kept free on the right
+        const int width = std::max(*sidebar_width - 3, 12);
         const int size_width = 7;                         // "~" + toCompact / toCount (5 characters at most)
         const int growth_width = width >= 30 ? 8 : 0;     // " +12.3%"
         const int age_width = data->show_age && width >= 36 ? 6 : 0;   // " 1.4y"
@@ -353,19 +355,20 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             hbox(
                 filler(),
-                text(age) | color(Color::GrayDark)
+                text(age) | dim
             ) | size(WIDTH, EQUAL, age_width),
 
             hbox(
                 filler(),
-                text(item.label == ".." ? "" : mark) | color(item.error ? Color::RGB(255, 140, 0) : Color::GrayDark),
-                text(item.label == ".." ? "" : !item.known ? "?" : scanner->formatShort(item.size)) | color(Color::GrayDark)
+                item.error ? text(item.label == ".." ? "" : mark) | color(ui::theme::yellow()) : text(item.label == ".." ? "" : mark) | dim,
+                text(item.label == ".." ? "" : !item.known ? "?" : scanner->formatShort(item.size)) | dim
             ) | size(WIDTH, EQUAL, size_width)
         });
 
-        // Marked entries (SPACE): yellow, as long as they aren't the selected one
-        return is_selected ? row | bgcolor(Color::White) | color(Color::Black)
-                           : row | bgcolor(Color::Default) | color(is_marked ? Color::RGB(255, 215, 0) : Color::White);
+        // As in RSV: the text in the terminal's own color, the selection inverted; marked entries (SPACE) yellow
+        if (is_selected)
+            return row | inverted;
+        return is_marked ? row | color(ui::theme::yellow()) : row;
     };
 
     // On selected: update data with a new path, and wake worker thread

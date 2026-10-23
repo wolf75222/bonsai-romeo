@@ -4,7 +4,7 @@
 
 ![The list of your spaces](../img/spaces.png)
 
-bonsai-romeo starts on **your spaces**: home, scratch, and one entry per project you belong to. `ENTER` opens a folder. `⌫` or `ESC` goes back up, and from a space straight back to the list of spaces. The title shows where you are.
+bonsai-romeo starts on **your spaces**: home, scratch, and one entry per project you belong to. `ENTER` opens a folder. `⌫` or `ESC` goes back up, and from a space straight back to the list of spaces. The path shows in the frame of the Explorer panel; the right panel is titled with the selected entry, its size, files and last change.
 
 - Sizes marked `~` aren't final yet: they come from the previous scan while this one runs. A folder switches to its new size once it is scanned.
 - `?`: a folder of yours the scan doesn't know, not reached yet or made after the scan. `R` scans the folder shown again and gives it its size.

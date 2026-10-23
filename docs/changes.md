@@ -6,6 +6,7 @@
 - Quota view, cleanup suggestions and folder search, plus the `--quota`, `--cleanup` and `--summary` modes.
 - A cache of the previous scan, shown while the new one runs (marked `~`). It is merged on save, so scanning one folder keeps the rest.
 - `install.sh` builds with cmake from Spack and installs to `~/.local/bin`.
+- The look of [RSV](https://github.com/wolf75222/RSV), the Slurm viewer for ROMEO: a title bar, framed panels with their title in the frame, one line of keys.
 - Quitting waits for one `mmlsquota` call at most when GPFS is slow (it waited for all of them, twice when one timed out).
 - `?` marks a folder of yours that the scan doesn't know (made after it). A folder you open again is read again.
 - Cleanup suggestions are computed in the background. Old data only counts folders scanned completely, and files already deleted aren't listed.

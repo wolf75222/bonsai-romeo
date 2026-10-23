@@ -1,5 +1,6 @@
 #include "../../include/ui/quota_view.hpp"
 
+#include "../../include/ui/theme.hpp"
 #include "../../include/utils/format.hpp"
 #include "../../include/utils/json.hpp"
 
@@ -13,12 +14,12 @@ constexpr int BAR_WIDTH = 32;
 
 Color stateColor(Quota::State s) {
     switch (s) {
-        case Quota::State::OK:       return Color::RGB(60, 179, 113);
-        case Quota::State::NO_LIMIT: return Color::GrayDark;
-        case Quota::State::NOTICE:   return Color::RGB(255, 215, 0);
-        case Quota::State::GRACE:    return Color::RGB(255, 140, 0);
+        case Quota::State::OK:       return ui::theme::green();
+        case Quota::State::NO_LIMIT: return ui::theme::gray();
+        case Quota::State::NOTICE:   return ui::theme::yellow();
+        case Quota::State::GRACE:    return Color::RGB(235, 125, 55);
         case Quota::State::EXPIRED:
-        case Quota::State::HARD:     return Color::RGB(255, 70, 70);
+        case Quota::State::HARD:     return ui::theme::red();
     }
     return Color::Default;
 }
@@ -187,12 +188,6 @@ std::string title(const Quota::Row& row) {
     return row.fileset + " - " + row.name + " - " + row.path;
 }
 
-std::string ago(const Quota::Report& report) {
-    const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - report.fetched_at).count();
-    if (seconds < 60) return std::to_string(seconds) + " s ago";
-    return std::to_string(seconds / 60) + " min ago";
-}
-
 std::string summary(const Quota::Report& report) {
     const int alerts = report.alerts();
     if (alerts > 0) return std::to_string(alerts) + " quota(s) need your attention";
@@ -267,20 +262,18 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
         return vbox({text(" "), text(report.error) | center | color(Color::RGB(255, 70, 70))}) | flex;
 
     Elements content;
-    content.push_back(text(" "));
     content.push_back(hbox({
-        text(" Quotas GPFS") | bold,
+        text(" " + summary(report)) | bold | color(stateColor(report.worst() == Quota::State::NO_LIMIT ? Quota::State::OK : report.worst())),
         filler(),
-        text("updated " + ago(report) + " - R refresh - 1-9 open - U back to chart ") | color(Color::GrayDark),
+        ui::keyHints({{"r", "refresh"}, {"1-9", "open a space"}, {"u", "chart"}}),
     }));
-    content.push_back(text(" " + summary(report)) | bold | color(stateColor(report.worst() == Quota::State::NO_LIMIT ? Quota::State::OK : report.worst())));
     content.push_back(text(" "));
 
     // Files that can make writes fail: first, so they never fall below the screen
     if (!report.stray_group.empty()) {
         Elements lines;
         for (const auto& l : strayHelp(report)) lines.push_back(paragraph(" " + l));
-        content.push_back(window(text(" Files outside of the project quota ") | bold | color(stateColor(Quota::State::GRACE)), vbox(std::move(lines))));
+        content.push_back(ui::panel("Files outside of the project quota", vbox(std::move(lines)), stateColor(Quota::State::GRACE)));
     }
 
     const std::vector<Target> numbered = targets(report, scope);
@@ -289,10 +282,10 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
         const Quota::Row& row = report.rows[i];
         if (!row.space.limited() && !row.inodes.limited()) {
             // The user quota on projet: counted on the project groups instead
-            content.push_back(window(text(" " + title(row) + " "), vbox({
+            content.push_back(ui::panel(title(row), vbox({
                 text(" " + FormatUtils::toReadable(row.space.used, " ") + " - " + FormatUtils::withSeparators(row.inodes.used) + " files") | bold,
-                paragraph(" No individual limit here: what you put in a project counts on the project's quota (cards below).") | color(Color::GrayLight),
-            })) | color(Color::GrayLight));
+                paragraph(" No individual limit here: what you put in a project counts on the project's quota (cards below).") | dim,
+            }), ui::theme::gray()));
             continue;
         }
 
@@ -316,7 +309,7 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
             }
         }
 
-        content.push_back(window(text(" " + key + title(row) + " ") | bold | color(c), vbox(std::move(lines))));
+        content.push_back(ui::panel(key + title(row), vbox(std::move(lines)), c));
     }
 
 

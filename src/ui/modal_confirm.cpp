@@ -1,4 +1,5 @@
 #include "../../include/ui/modal_confirm.hpp"
+#include "../../include/ui/theme.hpp"
 
 #include <algorithm>
 
@@ -19,17 +20,22 @@ Component BonsaiModalConfirm::confirm(std::function<void ()> action, std::functi
             start = end + 1;
         }
 
-        return vbox({
+        // Red for a deletion, as RSV's scancel; packing deletes too, once the archive is checked
+        const bool deleting = text_->button == "delete";
+        const Color frame = deleting ? ui::theme::red() : ui::theme::yellow();
+        std::string title = text_->button;
+        if (!title.empty()) title[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(title[0])));
+
+        return ui::overlay(ui::panel(title, vbox({
             text(""),
             text(text_->title) | center,
             vbox(std::move(lines)),
-            text(text_->warning) | center | color(Color::IndianRed),
+            text(text_->warning) | center | color(frame),
             text(""),
             inner | center,
-            text("LEFT / RIGHT to choose, ENTER to confirm, ESC to cancel") | center | color(Color::GrayDark),
+            ui::keyHints({{"left/right", "choose"}, {"enter", "confirm"}, {"esc", "cancel"}}) | center,
             text(""),
-
-        }) | size(WIDTH, GREATER_THAN, 70) | border;
+        }) | size(WIDTH, GREATER_THAN, 70), frame));
     });
     return component;
 }

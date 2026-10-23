@@ -1,6 +1,7 @@
 #include "../../include/ui/help_view.hpp"
 
 #include "../../include/ui/focus.hpp"
+#include "../../include/ui/theme.hpp"
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -55,26 +56,25 @@ const std::vector<Group> GROUPS = {
 
 Component BonsaiHelp::window(std::function<void()> on_close) {
     auto view = Renderer([] {
+        // As in RSV's help: the keys in the accent color, what they do in the terminal's own
         Elements rows;
         for (const auto& group : GROUPS) {
-            rows.push_back(text(std::string(" ") + group.title) | bold);
+            rows.push_back(text(group.title) | bold);
             for (const auto& key : group.keys) {
                 rows.push_back(hbox({
-                    text("   " + std::string(key.keys)) | color(Color::RGB(255, 215, 0)) | size(WIDTH, EQUAL, 20),
+                    text("  " + std::string(key.keys)) | bold | color(ui::theme::accent()) | size(WIDTH, EQUAL, 18),
                     text(key.what),
                 }));
             }
             rows.push_back(text(""));
         }
+        rows.push_back(text("Sizes: ~ from the previous scan (still scanning) · ? not scanned · ! unreadable folder in it") | dim);
 
-        return vbox({
-            text(" Keys ") | bold | center,
-            separator(),
-            vbox(std::move(rows)) | vscroll_indicator | yframe | size(HEIGHT, LESS_THAN, 34),
-            separator(),
-            text(" Sizes: ~ from the previous scan (still scanning)   ? not scanned   ! unreadable folder in it") | color(Color::GrayDark),
-            text(" ESC close") | color(Color::GrayDark),
-        }) | border | size(WIDTH, LESS_THAN, 100);
+        return ui::overlay(ui::panel("bonsai-romeo keys", vbox({
+            vbox(std::move(rows)) | vscroll_indicator | yframe | size(HEIGHT, LESS_THAN, 36),
+            separator() | dim,
+            ui::keyHints({{"esc", "close"}}),
+        }), ui::theme::accent()) | size(WIDTH, LESS_THAN, 102));
     });
 
     return keepFocus(CatchEvent(view, [on_close](Event event) {
