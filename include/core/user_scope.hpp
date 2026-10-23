@@ -14,6 +14,7 @@ Explanation:
 
 #pragma once
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <grp.h>
@@ -136,6 +137,29 @@ public:
                 return shown + real.substr(path.size());
         }
         return real;
+    }
+
+    bool isRoot(const std::string& real) const {
+        return std::find(roots.begin(), roots.end(), real) != roots.end();
+    }
+
+    /* Short name of a space, for the pie: "home", "scratch", "r250127" (empty if `real` isn't a space)
+    - label() adds what it is for the sidebar: "home", "scratch", "project r250127"
+    */
+    std::string shortName(const std::string& real) const {
+        if (!isRoot(real))
+            return "";
+
+        const std::string shown = display(real);
+        if (shown == "~") return "home";
+        if (shown.rfind("/scratch", 0) == 0) return "scratch";
+        if (shown.rfind("/project/", 0) == 0) return shown.substr(9);
+        return fs::path(real).filename().string();
+    }
+
+    std::string label(const std::string& real) const {
+        const std::string name = shortName(real);
+        return display(real).rfind("/project/", 0) == 0 ? "project " + name : name;
     }
 
     bool owns(const fs::path& path) const {

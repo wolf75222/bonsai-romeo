@@ -32,8 +32,26 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
         try {
             std::vector<AppData::BonsaiMenuEntry> unsorted_entries;
 
+            // At the top: the user's spaces, not the folders of GPFS above them
+            const bool spaces_view = scanner->isSpacesView(current_path);
+
+            if (spaces_view) {
+                for (const auto& root : scanner->getScope().roots) {
+                    const Scanner::Totals totals = scanner->totals(root);
+
+                    AppData::BonsaiMenuEntry item;
+                    item.path = root;
+                    item.label = scanner->getScope().label(root);
+                    item.is_dir = true;
+                    item.size = scanner->value(totals);
+                    item.final = totals.final;
+                    item.snapped_size = scanner->getSnapped(root);
+                    unsorted_entries.push_back(std::move(item));
+                }
+            }
+
             // Parse current path and get relevant data (size, is_dir, path, etc.)
-            for (const auto& entry : fs::directory_iterator(current_path)) {
+            else for (const auto& entry : fs::directory_iterator(current_path)) {
                 // Other users' files and folders aren't shown
                 if (!scanner->visible(entry))
                     continue;
@@ -216,7 +234,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
     };
 
     // On selected: update data with a new path, and wake worker thread
-    options.on_enter = [screen, data, selected]() {
+    options.on_enter = [screen, data, selected, scanner, default_path]() {
         std::string new_path;
         {
             std::lock_guard<std::mutex> lock(data->menu_mutex);
@@ -226,10 +244,13 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             new_path = (*data->menu_entries)[*selected].path;
 
-            // For ".." go up
+            // For ".." go up; from a space, straight back to the list of spaces
             if ((*data->menu_entries)[*selected].label == "..") {
                 std::filesystem::path p(*data->path);
                 new_path = p.parent_path().string();
+
+                if (scanner->getScope().relation(new_path) != UserScope::Relation::INSIDE)
+                    new_path = default_path.string();
             }
 
             *data->selected = *selected;

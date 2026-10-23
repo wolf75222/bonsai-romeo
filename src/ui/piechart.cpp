@@ -13,16 +13,9 @@
 #include <sys/ioctl.h>
 #include <unistd.h>
 
-void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int r1, int r2, int r_inner, double start_deg, double sweep_deg, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id) {
+void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int r1, int r2, int r_inner, double start_deg, double sweep_deg, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id, std::vector<Label>& labels) {
     if (sweep_deg <= 0.0)
         return;
-
-    // This could also be made user-customizable
-    int max_label_length = 5;
-    std::string display_label = label;
-    if (FormatUtils::length(display_label) > static_cast<size_t>(max_label_length)) {
-        display_label = display_label.substr(0, FormatUtils::offsetOf(display_label, max_label_length - 2)) + "..";
-    }
 
     const double start = start_deg * M_PI / 180.0;
     const double end   = (start_deg + sweep_deg) * M_PI / 180.0;
@@ -49,8 +42,49 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
     // Label in the middle of the slice. A character is 2 dots wide on the canvas
     const double mid_angle = start + (end - start) / 2.0;
     const double mid_t = (inner_t + 1.0) / 2.0;
-    const int text_x = static_cast<int>(cx + std::cos(mid_angle) * r1 * mid_t) - static_cast<int>(FormatUtils::length(display_label));
-    const int text_y = static_cast<int>(cy + std::sin(mid_angle) * r2 * mid_t);
+
+    /* Label length: what fits in the slice, on the row of the label
+    - Measured: from the middle of the slice, dot by dot to the left and to the right, while still
+      inside the slice (between its two radii and its two angles)
+    - Up to 16 characters ("pops_adc_comp.."): upstream cut every name to 3 ("pop..")
+    - No label at all when neither the name nor 3 of its letters fit, or the slice is less than a
+      row high there: it would only cover its neighbours
+    */
+    const double y_ratio = r1 > 0 ? static_cast<double>(r2) / r1 : 1.0;
+    const double center_x = cx + std::cos(mid_angle) * r1 * mid_t;
+    const double center_y = cy + std::sin(mid_angle) * r2 * mid_t;
+
+    auto inside = [&](double px, double py) {
+        const double dx = px - cx;
+        const double dy = (py - cy) / y_ratio;   // Back to a round pie
+        const double r = std::hypot(dx, dy);
+        if (r < r_inner || r > r1)
+            return false;
+
+        double a = std::atan2(dy, dx);
+        while (a < start) a += 2 * M_PI;
+        while (a >= start + 2 * M_PI) a -= 2 * M_PI;
+        return a <= end;
+    };
+
+    int left = 0;
+    while (left < 40 && inside(center_x - left - 1, center_y)) left++;
+    int right = 0;
+    while (right < 40 && inside(center_x + right + 1, center_y)) right++;
+
+    // A label of n characters is 2n dots wide, n on each side of the middle; one dot of margin
+    const int room = std::min(left, right) - 1;
+    const bool tall_enough = inside(center_x, center_y - 1.5) && inside(center_x, center_y + 1.5);
+
+    // The whole name, or at least 3 of its letters: "h.." says nothing
+    const size_t length = FormatUtils::length(label);
+    std::string display_label;
+    if (tall_enough && room >= 3 && (length <= static_cast<size_t>(room) || room >= 5)) {
+        display_label = FormatUtils::trimSuffix(label, static_cast<size_t>(std::min(room, 16)), "..");
+    }
+
+    const int text_x = static_cast<int>(center_x) - static_cast<int>(FormatUtils::length(display_label));
+    const int text_y = static_cast<int>(center_y);
 
     const int width = c.width();
     const int height = c.height();
@@ -96,10 +130,8 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
         sin_a = new_sin;
     }
 
-    c.DrawText(text_x, text_y, display_label, [color, text_color](Cell &c) {
-        c.foreground_color = text_color;
-        c.background_color = color;
-    });
+    if (!display_label.empty())
+        labels.push_back(Label{text_x, text_y, display_label, color, text_color});
 }
 
 double BonsaiPie::cellRatio() {
@@ -130,6 +162,14 @@ static std::array<int, 3> darken(const std::array<int, 3>& rgb, double t) {
     return out;
 }
 
+// Towards white by `t` (0..1): the folders inside the selection
+static std::array<int, 3> lighten(const std::array<int, 3>& rgb, double t) {
+    std::array<int, 3> out;
+    for (int i = 0; i < 3; i++)
+        out[i] = static_cast<int>(rgb[i] + (255 - rgb[i]) * t);
+    return out;
+}
+
 // An entry gets its own slice when it weighs at least `threshold` percent of the displayed directory
 static bool reachesThreshold(uint64_t size, uint64_t root_size, double threshold) {
     return root_size > 0 && size <= root_size && size * 100.0 / root_size >= threshold;
@@ -137,6 +177,18 @@ static bool reachesThreshold(uint64_t size, uint64_t root_size, double threshold
 
 void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, uint64_t root_size, double threshold, Scanner* scanner) {
     if (current_depth > max_depth) return;
+
+    // Above the spaces: the spaces themselves, like the menu (see Scanner::isSpacesView)
+    if (scanner->isSpacesView(dir)) {
+        for (const auto& root : scanner->getScope().roots) {
+            const uint64_t size = scanner->get(root);
+            entries.push_back(EntryInfo{root, size, true, current_depth});
+
+            if (reachesThreshold(size, root_size, threshold))
+                collectEntries(root, entries, current_depth + 1, max_depth, root_size, threshold, scanner);
+        }
+        return;
+    }
 
     std::error_code dir_ec;
     fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, dir_ec);
@@ -297,6 +349,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
         struct SliceColor {
             std::array<int, 3> rgb;
             Color text;
+            bool selected;   // In the selected folder (shown paler)
         };
         std::map<std::string, SliceColor> slice_colors;
 
@@ -393,8 +446,13 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                 text_color = slice_colors[parent].text;
             }
 
-            Color display_color = Color::RGB(rgb[0], rgb[1], rgb[2]);
-            Color display_text = text_color;
+            const bool in_selection = entry.depth != 0 && slice_colors[entry.path.parent_path().string()].selected;
+
+            // Inside the selected folder: paler, still in its colors (upstream turned it all gray)
+            const std::array<int, 3> shown = in_selection && !cfg.CHART_HIGHLIGHT_SUBTREE ? lighten(rgb, 0.45) : rgb;
+            Color display_color = Color::RGB(shown[0], shown[1], shown[2]);
+            Color display_text = in_selection && !cfg.CHART_HIGHLIGHT_SUBTREE ? Color::Black : text_color;
+            bool selected_here = in_selection;
 
             /* In these two code blocks, false is the logic to check wether the slice is selected
             - selected can be -1 because we manually add a back entry for non default_dir paths
@@ -409,6 +467,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                 if (is_selected) {
                     display_color = Color::RGB(255, 255, 255);
                     display_text = Color::Black;
+                    selected_here = true;
 
                     if (cfg.CHART_HIGHLIGHT_SUBTREE) {
                         rgb = {255, 255, 255};
@@ -417,7 +476,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                 }
             }
 
-            slice_colors[entry.path.string()] = SliceColor{rgb, text_color};
+            slice_colors[entry.path.string()] = SliceColor{rgb, text_color, selected_here};
             Color color = display_color;
             text_color = display_text;
 
@@ -427,7 +486,9 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             slice.text_color = text_color;
             slice.inner_radius = inner_radius;
             slice.outer_radius = outer_radius;
-            slice.label = entry.path.filename().string();
+            // A space is named after what it is: "home", "scratch", "r250127" (its folder is just the user's name)
+            const std::string space = scanner->getScope().shortName(entry.path.string());
+            slice.label = space.empty() ? entry.path.filename().string() : space;
             slice.sweep = sweep;
 
             if(entry.depth == 0) {
@@ -529,12 +590,19 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
             Config cfg = Config::get();
             int max_layers = cfg.CHART_MAX_GENERATIONS;
 
+            // The rings drawn share the room: 2 rings during the scan, up to CHART_MAX_GENERATIONS after it
+            int rings = 1;
+            for (const auto& entry : entries)
+                rings = std::max(rings, entry.depth + 1);
+            rings = std::min(rings, std::max(max_layers, 1));
+
             int available_radius = max_radius - inner_hole_radius;
-            int layer_thickness = available_radius / max_layers;
+            int layer_thickness = available_radius / rings;
 
             // One marker per block of the canvas: the last slice that drew it (see drawAngledBlockEllipseRingOffset)
             std::vector<int> drawn_by(static_cast<size_t>(std::max(w, 0)) * (std::max(h, 0) / 2 + 1), -1);
             int slice_id = 0;
+            std::vector<BonsaiPie::Label> labels;
 
             for (auto& entry : entries) {
 
@@ -554,8 +622,16 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
                     entry.color,
                     entry.text_color,
                     drawn_by,
-                    slice_id++
+                    slice_id++,
+                    labels
                 );
+            }
+
+            for (const auto& label : labels) {
+                c.DrawText(label.x, label.y, label.text, [&label](Cell &cell) {
+                    cell.foreground_color = label.text_color;
+                    cell.background_color = label.color;
+                });
             }
 
             // A character is 2 dots wide: half the label is `length` dots

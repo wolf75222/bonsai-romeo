@@ -237,35 +237,56 @@ int main(int argc, char* argv[]) {
     bool show_error_modal = false;
     Scanner::ScannerRemoveResult result = Scanner::ScannerRemoveResult{"", false};
 
+    /* Deletion
+    - D asks first, showing what and how much; the window starts on "cancel"
+    - Removing a big folder from GPFS can take minutes: it runs on its own thread, the explorer stays usable
+    - Only one at a time; quitting waits for it to finish
+    */
+    std::string confirm_target;   // Shown in the confirm window
+    std::string confirm_path;     // What D asked to delete
+    int confirm_focus = 0;        // 0: cancel, 1: delete
+    std::atomic<bool> deleting{false};
+    std::string deleting_label;   // UI thread only
+    std::thread delete_thread;
+
     auto confirm_modal = BonsaiModalConfirm::confirm(
-        [data, &scanner, &result, &show_confirm_modal, &show_error_modal](){
-            fs::path selected_path;
-
-            {
-                std::lock_guard<std::mutex> lock(data->menu_mutex);
-                selected_path = (*data->menu_entries)[*data->selected].path;
-            }
-
-            result = scanner.remove(selected_path);
-
-            if(result.failed) {
-                show_error_modal = true;
-            }
-
+        [&]() {
             show_confirm_modal = false;
+            if (confirm_path.empty() || deleting)
+                return;
 
-            {
-                // Wake up both pie and menu on change
-                std::lock_guard<std::mutex> lock(data->cv_mutex);
-                data->menu_path_changed = true;
-                data->pie_path_changed = true;
-            }
+            if (delete_thread.joinable())
+                delete_thread.join();
 
-            data->cv.notify_all();
+            deleting = true;
+            deleting_label = scope.display(confirm_path);
+
+            delete_thread = std::thread([&, path = confirm_path] {
+                const Scanner::ScannerRemoveResult removed = scanner.remove(path);
+
+                // Back on the UI thread
+                screen.Post([&, removed] {
+                    deleting = false;
+                    result = removed;
+                    if (result.failed)
+                        show_error_modal = true;
+
+                    {
+                        // Wake up both pie and menu on change
+                        std::lock_guard<std::mutex> lock(data->cv_mutex);
+                        data->menu_path_changed = true;
+                        data->pie_path_changed = true;
+                    }
+                    data->cv.notify_all();
+                });
+                screen.PostEvent(Event::Custom);
+            });
         },
         [&]{
             show_confirm_modal = false;
-        }
+        },
+        &confirm_target,
+        &confirm_focus
     );
 
     confirm_modal = CatchEvent(confirm_modal, [&show_confirm_modal](Event event) {
@@ -300,9 +321,45 @@ int main(int argc, char* argv[]) {
     MenuOption option;
 
     auto menu_component = BonsaiMenu::menu(&screen, data, &scanner, &selected, &config.SIDEBAR_WIDTH, default_path, option);
-    menu_component = CatchEvent(menu_component, [data, &scanner, &default_path, &show_confirm_modal](Event event) {
+    menu_component = CatchEvent(menu_component, [&](Event event) {
         // Mac keyboards have no SUPPR key (their delete key is Backspace, which goes up a folder): D works everywhere
         if (event == Event::Delete || event == Event::Character('d') || event == Event::Character('D')) {
+            if (deleting)
+                return true;
+
+            std::string path;
+            bool is_dir = false;
+            {
+                std::lock_guard<std::mutex> lock(data->menu_mutex);
+                if (*data->selected >= 0 && *data->selected < static_cast<int>(data->menu_entries->size())) {
+                    path = (*data->menu_entries)[*data->selected].path;
+                    is_dir = (*data->menu_entries)[*data->selected].is_dir;
+                }
+            }
+
+            // ".." has no path
+            if (path.empty())
+                return true;
+
+            // A whole space (all of home, all of scratch) is never one key away
+            if (scope.isRoot(path)) {
+                result = Scanner::ScannerRemoveResult{"This is one of your spaces: open it and delete what is inside instead.", true};
+                show_error_modal = true;
+                return true;
+            }
+
+            const Scanner::Totals totals = scanner.totals(path);
+            std::string amount;
+            if (is_dir) {
+                amount = FormatUtils::toReadable(totals.disk, " ") + " on disk, " + FormatUtils::toCount(totals.inodes, " ") + " files";
+            } else {
+                std::error_code ec;
+                amount = FormatUtils::toReadable(fs::file_size(path, ec), " ");
+            }
+
+            confirm_path = path;
+            confirm_target = scope.display(path) + "   (" + amount + ")";
+            confirm_focus = 0;
             show_confirm_modal = true;
             return true;
         }
@@ -318,6 +375,10 @@ int main(int argc, char* argv[]) {
 
                 std::filesystem::path p(*data->path);
                 new_path = p.parent_path().string();
+
+                // From a space, straight back to the list of spaces (not GPFS's folders above it)
+                if (scope.relation(new_path) != UserScope::Relation::INSIDE)
+                    new_path = default_path.string();
 
                 *data->path = new_path;
                 data->select_label.clear();
@@ -353,6 +414,11 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lock_m(data->menu_mutex);
 
         const Scanner::Metric metric = scanner.getMetric();
+
+        // Where the explorer is, the way the user knows it
+        const std::string here = deleting ? "deleting " + deleting_label + "..."
+                               : scanner.isSpacesView(*data->path) ? "your spaces" : scope.display(*data->path);
+        const size_t here_width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
         const char* metric_label = metric == Scanner::Metric::INODES ? " [files]" : (metric == Scanner::Metric::DISK ? " [disk]" : " [size]");
 
         return vbox({
@@ -363,6 +429,7 @@ int main(int argc, char* argv[]) {
                 text(" "),
                 BonsaiQuotaView::badge(quotas.get(), quotas.ready()),
             }) | center,
+            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(deleting ? Color::RGB(255, 140, 0) : Color::GrayLight),
             separator(),
             hbox({
                 menu_component->Render() | frame | flex,
@@ -390,15 +457,24 @@ int main(int argc, char* argv[]) {
     auto open_in_explorer = [&](const std::string& path) {
         fs::path target(path);
         fs::path folder = target.parent_path();
+        std::string label = target.filename().string();
+
+        // A space itself: selected in the list of spaces
+        if (scope.isRoot(target.string()) && scanner.isSpacesView(default_path)) {
+            folder = default_path;
+            label = scope.label(target.string());
+        }
 
         // Never above where the explorer starts
-        if (!UserScope::isUnder(folder.native(), default_path.native()))
+        if (!UserScope::isUnder(folder.native(), default_path.native())) {
             folder = target;
+            label.clear();
+        }
 
         {
             std::lock_guard<std::mutex> lock(data->menu_mutex);
             *data->path = folder.string();
-            data->select_label = folder == target ? "" : target.filename().string();
+            data->select_label = label;
         }
 
         {
@@ -569,6 +645,12 @@ int main(int argc, char* argv[]) {
     screen.Loop(root);
     running = false;
     hangup_thread.join();
+
+    if (delete_thread.joinable()) {
+        if (deleting)
+            std::cerr << "Waiting for the deletion of " << deleting_label << " to finish..." << std::endl;
+        delete_thread.join();
+    }
 
 
     // Stop app

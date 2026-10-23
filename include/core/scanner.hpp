@@ -136,6 +136,15 @@ public:
     std::vector<SearchHit> search(const std::string& query, size_t max_hits, size_t& total,
                                   const std::function<bool()>& cancelled = {});
 
+    /* Spaces view
+    - Without a path to start from, the explorer starts above all the spaces (/gpfs): listing that
+      folder would show GPFS's own folders (home, scratch, projet), each holding only the user's one.
+    - There, the spaces themselves are listed instead: home, scratch, one entry per project.
+    */
+    bool isSpacesView(const fs::path& p) const {
+        return scope.roots.size() > 1 && p.native() == path.native() && scope.relation(path.native()) == UserScope::Relation::ANCESTOR;
+    }
+
     const UserScope& getScope() const { return scope; }
     uint32_t directories() const { return tree.count(); }
 

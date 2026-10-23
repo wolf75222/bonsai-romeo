@@ -1,18 +1,20 @@
 #include "../../include/ui/modal_confirm.hpp"
 
-Component BonsaiModalConfirm::confirm(std::function<void ()> action, std::function<void ()> exit) {
+Component BonsaiModalConfirm::confirm(std::function<void ()> action, std::function<void ()> exit, const std::string* target, int* focused) {
     auto component = Container::Horizontal({
-        Button("confirm", action, ButtonOption::Ascii()) | bgcolor(Color::Default) | color(Color::SpringGreen2),
-        Button("cancel", exit, ButtonOption::Ascii()) | bgcolor(Color::Default) | color(Color::IndianRed),
-    });
+        Button("cancel", exit, ButtonOption::Ascii()) | bgcolor(Color::Default),
+        Button("delete", action, ButtonOption::Ascii()) | bgcolor(Color::Default) | color(Color::IndianRed),
+    }, focused);
 
-    component |= Renderer([&](Element inner) {
+    component |= Renderer([target](Element inner) {
         return vbox({
             text(""),
-            text("Are you sure you want to delete the following file / folder?") | center,
-            text("This action is irreversible.") | center,
+            text("Delete this for good?") | center,
+            text(*target) | bold | center,
+            text("ROMEO has no backups: this can't be undone.") | center | color(Color::IndianRed),
             text(""),
             inner | center,
+            text("LEFT / RIGHT to choose, ENTER to confirm, ESC to cancel") | center | color(Color::GrayDark),
             text(""),
 
         }) | size(WIDTH, GREATER_THAN, 70) | border;

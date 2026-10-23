@@ -8,6 +8,8 @@ What changes compared to upstream:
 
 - **Only your spaces are scanned**: `/home/$USER`, `/scratch_p/$USER`, and `/project/<group>`
   for every project group you belong to (`id -Gn`). Everything else on GPFS is skipped.
+  The explorer starts on the list of your spaces (home, scratch, project ...), not on GPFS's
+  folders above them, and shows where you are under its title.
 - **Only your files are counted and listed**: in shared `/project/<group>` folders, other
   members' files are invisible, and their folders only appear if they contain files of yours.
 - **Numbers that match the quotas**: files with several hard links (conda environments, git,
@@ -27,7 +29,8 @@ What changes compared to upstream:
   space *and* number of files, same rules as ROMEO's `/apps/romeotools/myquotas.sh`.
 - **Faster scan on GPFS**: up to 32 threads (measured: 33 s with upstream's 16, 26 s with 32, for
   1.5 million files), one pass up the tree per folder, no stat above your spaces.
-- **Deleting is limited to what you own**, inside your spaces.
+- **Safer deleting**: only what you own, inside your spaces, never a whole space; the confirmation
+  shows what and how much, and starts on "cancel". Big folders are deleted in the background.
 - Columns stay aligned in any terminal (ASCII icons, UTF-8 aware truncation), and the pie keeps its
   24-bit colors through SSH and stays round whatever the font.
 - `bonsai-romeo --summary [path]`: scan, print size, size on disk and file count of each space.
@@ -54,7 +57,7 @@ frees the build files. The binary is x86_64: it runs on the login nodes and the 
 
 ```bash
 bonsai-romeo                       # all your spaces
-bonsai-romeo /project/r250127      # one project, only your files in it
+bonsai-romeo /project/<group>      # one project, only your files in it
 bonsai-romeo --quota               # quotas only, no UI
 bonsai-romeo --cleanup             # what could be cleaned, no UI
 bonsai-romeo --summary             # sizes and file counts, no UI
@@ -94,8 +97,10 @@ On a Mac keyboard `âŒ«` is Backspace (go up), not delete: use `D` (or `fn` + `âŒ
   terminal and font. Nerd Font icons can still be set in `~/.config/bonsai-romeo/bonsai.conf`.
 - Sizes in the sidebar are short (`282G`, `45.2G`, `911M`) so they always fit their column, and the
   columns follow the sidebar when it is resized with the arrow keys.
-- The selected folder only turns white in the inner ring: its sub-folders keep their colors.
-  `CHART_HIGHLIGHT_SUBTREE = true` brings back upstream's look (the whole folder in grays).
+- The selected folder turns white in the inner ring and its sub-folders turn paler, in their own
+  colors. `CHART_HIGHLIGHT_SUBTREE = true` brings back upstream's look (the whole folder in grays).
+- Labels in the pie are as long as their slice allows (up to 16 characters, upstream: 3), and
+  are drawn last so no slice covers them; the rings fill the room (2 during the scan, then 4).
 - The pie is round on screen: the size of a character cell is read from the terminal (SSH
   forwards it), since cells are rarely exactly twice as tall as wide (Warp: 9 x 20.4 px).
   If your terminal doesn't report it, set `CHART_CELL_RATIO` (cell height / width) in the config.

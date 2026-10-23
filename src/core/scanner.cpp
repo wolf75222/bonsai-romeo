@@ -530,6 +530,11 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         return ScannerRemoveResult{"This isn't yours: only your own files can be removed.", true};
     }
 
+    // Nor a whole space at once
+    if (scope.isRoot(path.native())) {
+        return ScannerRemoveResult{"This is one of your spaces: open it and delete what is inside instead.", true};
+    }
+
     DirTree::Counts removed;
     uint32_t removed_dir = DirTree::NONE;
 

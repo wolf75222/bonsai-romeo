@@ -82,7 +82,7 @@ private:
               once per block (drawn_by remembers which slice drew each block last).
         - Computes mid-angle and mid-radius to position the label
         approximately centered inside the slice.
-        - Renders the label with foreground/background color contrast.
+        - Adds the label to `labels` (foreground/background color contrast), as long as it fits in the slice.
 
     Notes:
         - Terminal cells aren't exactly twice as tall as wide (Warp: 9 x 20.4 px, ratio 2.26),
@@ -98,5 +98,14 @@ private:
     */
     static double cellRatio();
 
-    static void drawAngledBlockEllipseRingOffset(Canvas& c, int x1, int y1, int r1, int r2, int r3, double starting_angle, double angle, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id);
+    // A slice's label, drawn once every slice is drawn: a later slice can't cover it
+    struct Label {
+        int x;
+        int y;
+        std::string text;
+        Color color;
+        Color text_color;
+    };
+
+    static void drawAngledBlockEllipseRingOffset(Canvas& c, int x1, int y1, int r1, int r2, int r3, double starting_angle, double angle, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id, std::vector<Label>& labels);
 };
