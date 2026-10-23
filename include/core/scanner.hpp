@@ -37,7 +37,7 @@ namespace fs = std::filesystem;
 class Scanner {
 public:
     /* ScannerRemoveResult
-    - Purely used for error messages and error codes
+    - Error messages and error codes; when it didn't fail, `reason` may hold a remark about the deletion
     */
     struct ScannerRemoveResult {
         std::string reason;

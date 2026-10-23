@@ -247,6 +247,8 @@ int main(int argc, char* argv[]) {
     int confirm_focus = 0;        // 0: cancel, 1: delete
     std::atomic<bool> deleting{false};
     std::string deleting_label;   // UI thread only
+    std::string notice;           // "deleted ...", shown under the title for a few seconds (UI thread only)
+    auto notice_until = std::chrono::steady_clock::now();
     std::thread delete_thread;
 
     auto confirm_modal = BonsaiModalConfirm::confirm(
@@ -268,8 +270,13 @@ int main(int argc, char* argv[]) {
                 screen.Post([&, removed] {
                     deleting = false;
                     result = removed;
-                    if (result.failed)
+                    if (result.failed) {
                         show_error_modal = true;
+                    } else {
+                        notice = "deleted " + deleting_label + (removed.reason.empty() ? "" : " (" + removed.reason + ")");
+                        notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+                        screen.PostEvent(Event::Custom);
+                    }
 
                     {
                         // Wake up both pie and menu on change
@@ -418,7 +425,9 @@ int main(int argc, char* argv[]) {
         const Scanner::Metric metric = scanner.getMetric();
 
         // Where the explorer is, the way the user knows it
+        const bool noticing = !notice.empty() && std::chrono::steady_clock::now() < notice_until;
         const std::string here = deleting ? "deleting " + deleting_label + "..."
+                               : noticing ? notice
                                : scanner.isSpacesView(*data->path) ? "your spaces" : scope.display(*data->path);
         const size_t here_width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
         const char* metric_label = metric == Scanner::Metric::INODES ? " [files]" : (metric == Scanner::Metric::DISK ? " [disk]" : " [size]");
@@ -431,7 +440,7 @@ int main(int argc, char* argv[]) {
                 text(" "),
                 BonsaiQuotaView::badge(quotas.get(), quotas.ready()),
             }) | center,
-            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(deleting ? Color::RGB(255, 140, 0) : Color::GrayLight),
+            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(deleting ? Color::RGB(255, 140, 0) : noticing ? Color::RGB(60, 179, 113) : Color::GrayLight),
             separator(),
             hbox({
                 menu_component->Render() | frame | flex,

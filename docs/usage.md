@@ -41,6 +41,8 @@ Shows your quotas for space and number of files: how much is left, and the grace
 
 `D` (or `fn` + `⌫`, which sends `SUPPR`) asks first, showing the path, size and file count. The dialog starts on **cancel**: `RIGHT` then `ENTER` deletes. It only deletes your own files inside your spaces, never a whole space. Big folders are deleted in the background, and deleting works while the scan runs.
 
+A folder is checked before anything is deleted. If something in it can't be deleted (someone else's folder, a read-only parent), nothing is deleted and the message says what blocks. Your own read-only folders inside it are made writable first, and the message says so.
+
 > ROMEO has no backups: what you delete is gone for good.
 
 ## Command line

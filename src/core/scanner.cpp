@@ -12,6 +12,7 @@
 #include <cctype>
 #include <fstream>
 #include <sstream>
+#include <dirent.h>
 #include <sys/stat.h>
 #include <thread>
 #include <type_traits>
@@ -95,6 +96,77 @@ const Junk* junk(const std::string& path) {
     }
 
     return nullptr;
+}
+
+/* Before removing a folder: can all of it be removed?
+- Removing an entry takes writing in, and entering, the folder holding it. remove_all() stops at the
+  first refusal and leaves the folder half deleted: so the whole tree is checked first, and nothing
+  is removed when something can't be.
+- Folders of the user's own without write permission (made read-only by a tool, or `chmod -w`) can
+  be fixed: they are listed to be made writable. Someone else's can't: `blocked` names one.
+- Only folders are looked at (one readdir each); files need a stat only in sticky folders.
+*/
+struct RemovalCheck {
+    std::vector<std::string> readonly;
+    std::string blocked;
+};
+
+RemovalCheck checkRemoval(const std::string& root, uid_t uid) {
+    RemovalCheck out;
+    std::vector<std::string> stack{root};
+
+    while (!stack.empty()) {
+        const std::string dir = std::move(stack.back());
+        stack.pop_back();
+
+        struct stat st;
+        if (lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
+            continue;
+
+        const bool usable = (st.st_mode & S_IRWXU) == S_IRWXU;
+        if (st.st_uid == uid) {
+            if (!usable) out.readonly.push_back(dir);
+        } else if (access(dir.c_str(), R_OK | W_OK | X_OK) != 0) {
+            out.blocked = dir;
+            return out;
+        }
+
+        // An unreadable folder of the user's can only be listed once fixed: it is taken as it comes
+        DIR* listing = opendir(dir.c_str());
+        if (!listing)
+            continue;
+
+        // In a sticky folder (like /tmp) only one's own entries can be removed
+        const bool sticky = (st.st_mode & S_ISVTX) && st.st_uid != uid;
+
+        while (const dirent* entry = readdir(listing)) {
+            const char* name = entry->d_name;
+            if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
+                continue;
+
+            std::string child = dir + "/" + name;
+            unsigned char type = entry->d_type;
+
+            if (type == DT_UNKNOWN || sticky) {
+                struct stat cs;
+                if (lstat(child.c_str(), &cs) != 0)
+                    continue;
+                if (sticky && cs.st_uid != uid) {
+                    out.blocked = child;
+                    closedir(listing);
+                    return out;
+                }
+                type = S_ISDIR(cs.st_mode) ? DT_DIR : DT_REG;
+            }
+
+            if (type == DT_DIR)
+                stack.push_back(std::move(child));
+        }
+
+        closedir(listing);
+    }
+
+    return out;
 }
 
 }
@@ -557,6 +629,29 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     const bool is_dir = fs::is_directory(fs::symlink_status(path, ec));
     const uint32_t parent = tree.find(path.parent_path().native());
 
+    // Removing an entry takes writing in its folder (left as it is: it isn't part of what is removed)
+    if (access(path.parent_path().c_str(), W_OK | X_OK) != 0) {
+        return ScannerRemoveResult{"Nothing was deleted: " + scope.display(path.parent_path().string())
+                                   + " is read-only (chmod u+w on it to delete what it holds).", true};
+    }
+
+    // A folder: everything in it must be removable, or nothing is removed (see checkRemoval())
+    size_t made_writable = 0;
+    if (is_dir) {
+        const RemovalCheck check = checkRemoval(path.string(), scope.uid);
+
+        if (!check.blocked.empty()) {
+            return ScannerRemoveResult{"Nothing was deleted: " + scope.display(check.blocked)
+                                       + " isn't yours and can't be emptied by you.", true};
+        }
+
+        for (const auto& dir : check.readonly) {
+            struct stat st;
+            if (lstat(dir.c_str(), &st) == 0 && chmod(dir.c_str(), (st.st_mode & 07777) | S_IRWXU) == 0)
+                made_writable++;
+        }
+    }
+
     /* A file is counted when its folder is read
     - Removed before that, it would be taken off totals it was never added to: wait (it is nearly always read already)
     - A file with other hard links frees nothing, and was counted once, maybe elsewhere: nothing to take off
@@ -582,8 +677,9 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         }
     } catch (const fs::filesystem_error&) {}
 
+    // Everything was checked beforehand: this is unexpected (the disk changed meanwhile, an I/O error...)
     if (ec) {
-        return ScannerRemoveResult{ec.message(), true};
+        return ScannerRemoveResult{ec.message() + (is_dir ? ": part of it may already be deleted, and its size is out of date until the next scan." : ""), true};
     }
 
     if (!is_dir) {
@@ -609,6 +705,11 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     }
 
     this->snapshot();
+
+    // Not an error: said next to the deletion
+    if (made_writable > 0)
+        return ScannerRemoveResult{std::to_string(made_writable) + " read-only folder" + (made_writable > 1 ? "s" : "") + " in it made writable first", false};
+
     return ScannerRemoveResult{"", false};
 }
 
