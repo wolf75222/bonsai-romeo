@@ -6,6 +6,7 @@
 #include "../include/ui/piechart.hpp"
 #include "../include/ui/menu.hpp"
 #include "../include/ui/quota_view.hpp"
+#include "../include/ui/cleanup_view.hpp"
 #include "../include/utils/format.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
@@ -20,6 +21,7 @@
 #include <string>
 #include <vector>
 
+#include <cstdio>
 #include <iostream>
 #include <unistd.h>
 #include <thread>
@@ -97,6 +99,7 @@ int main(int argc, char* argv[]) {
 
     bool summary = false;
     bool quota_only = false;
+    bool cleanup_only = false;
     std::vector<std::string> args;
 
     for (int i = 1; i < argc; i++) {
@@ -106,14 +109,20 @@ int main(int argc, char* argv[]) {
             summary = true;
         } else if (arg == "--quota") {
             quota_only = true;
+        } else if (arg == "--cleanup") {
+            cleanup_only = true;
         } else if (arg == "-h" || arg == "--help") {
-            std::cout << "Usage: bonsai-romeo [--summary | --quota] [path]\n"
+            std::cout << "Usage: bonsai-romeo [--summary | --quota | --cleanup] [path]\n"
                          "  Shows only your own data: home, scratch and your /project/<group> folders.\n"
-                         "  --summary   scan, print size and file count of each of your spaces, and exit\n"
+                         "  --summary   scan, print size, disk usage and file count of each of your spaces, and exit\n"
                          "  --quota     print your GPFS quotas (space and files) with gauges, and exit\n"
+                         "  --cleanup   scan, print what could be cleaned (caches, builds, old data, large files), and exit\n"
                          "  BONSAI_ROOTS=dir1:dir2   override the detected spaces\n"
+                         "  BONSAI_THREADS=n         scan threads (default: automatic, up to 32)\n"
                          "  BONSAI_COLOR=truecolor|256|16   force the color mode (default: auto)\n"
-                         "Keys: U quotas, F size / file count, R refresh quotas, D (or SUPPR) delete, Backspace/ESC up, Q quit\n";
+                         "Keys: F size / disk / files, C cleanup suggestions, U quotas, R refresh quotas,\n"
+                         "      D (or SUPPR) delete, ENTER open, Backspace/ESC up, Q quit\n"
+                         "Sizes marked ~ come from the previous scan (or are still growing) until the folder is scanned.\n";
             return 0;
         } else {
             args.push_back(arg);
@@ -149,6 +158,14 @@ int main(int argc, char* argv[]) {
     auto home = fs::path(getpwuid(getuid())->pw_dir);
     auto db_path = fs::weakly_canonical(home / ".cache/bonsai-romeo/db.txt");
 
+    if (cleanup_only) {
+        Scanner scanner = Scanner(default_path, db_path, scope);
+        scanner.scan();
+        std::cout << BonsaiCleanup::toText(scanner.cleanup(), scope, 40);
+        scanner.snapshot();
+        return 0;
+    }
+
     if (summary) {
         Scanner scanner = Scanner(default_path, db_path, scope);
         scanner.scan();
@@ -162,16 +179,18 @@ int main(int argc, char* argv[]) {
         if (shown.empty())
             shown.push_back(default_path.string());
 
-        uint64_t total = 0;
-        uint64_t total_inodes = 0;
+        Scanner::Totals total;
         for (const auto& path : shown) {
-            const uint64_t size = scanner.getBytes(path);
-            const uint64_t inodes = scanner.getInodes(path);
-            total += size;
-            total_inodes += inodes;
-            std::cout << FormatUtils::toReadableShort(size) << "\t" << FormatUtils::toCount(inodes) << " files\t" << path << "\n";
+            const Scanner::Totals t = scanner.totals(path);
+            total.bytes += t.bytes;
+            total.disk += t.disk;
+            total.inodes += t.inodes;
+
+            std::printf("%10s %10s on disk %10s files   %s\n", FormatUtils::toReadableShort(t.bytes).c_str(), FormatUtils::toReadableShort(t.disk).c_str(),
+                        FormatUtils::toCount(t.inodes).c_str(), scope.display(path).c_str());
         }
-        std::cout << FormatUtils::toReadableShort(total) << "\t" << FormatUtils::toCount(total_inodes) << " files\ttotal\n";
+        std::printf("%10s %10s on disk %10s files   total (%u directories)\n", FormatUtils::toReadableShort(total.bytes).c_str(), FormatUtils::toReadableShort(total.disk).c_str(),
+                    FormatUtils::toCount(total.inodes).c_str(), scanner.directories());
 
         scanner.snapshot();
         return 0;
@@ -190,6 +209,7 @@ int main(int argc, char* argv[]) {
     QuotaMonitor quotas;
     quotas.onUpdate([&screen] { screen.PostEvent(Event::Custom); });
     bool show_quota = false;
+    bool show_cleanup = false;
 
     Scanner scanner = Scanner(default_path, db_path, scope);
     std::thread scanner_thread([&scanner]() {
@@ -298,6 +318,7 @@ int main(int argc, char* argv[]) {
                 new_path = p.parent_path().string();
 
                 *data->path = new_path;
+                data->select_label.clear();
             }
 
             {
@@ -329,13 +350,14 @@ int main(int argc, char* argv[]) {
     auto left = Renderer(menu_container, [&] {
         std::lock_guard<std::mutex> lock_m(data->menu_mutex);
 
-        const bool files = scanner.getMetric() == Scanner::Metric::INODES;
+        const Scanner::Metric metric = scanner.getMetric();
+        const char* metric_label = metric == Scanner::Metric::INODES ? " [files]" : (metric == Scanner::Metric::DISK ? " [disk]" : " [size]");
 
         return vbox({
             text(" "),
             hbox({
                 text("Explorer") | bold,
-                text(files ? " [files]" : " [size]") | color(Color::GrayDark),
+                text(metric_label) | color(Color::GrayDark),
                 text(" "),
                 BonsaiQuotaView::badge(quotas.get(), quotas.ready()),
             }) | center,
@@ -345,7 +367,7 @@ int main(int argc, char* argv[]) {
                 text(" ")
             }) | flex,
             separator(),
-            text(" U quotas F files D delete Q quit") | color(Color::GrayDark),
+            text(" F size C clean U quota D del Q quit") | color(Color::GrayDark),
         });
     });
 
@@ -359,8 +381,42 @@ int main(int argc, char* argv[]) {
 
     auto window = ResizableSplitLeft(left, right, &config.SIDEBAR_WIDTH);
 
+    /* Cleanup suggestions (key C)
+    - ENTER goes to the entry in the explorer, selected, so D deletes it
+    */
+    auto cleanup_state = std::make_shared<BonsaiCleanup::State>();
+    auto cleanup_component = BonsaiCleanup::window(cleanup_state, &scanner.getScope(),
+        [&](const Scanner::CleanupItem& item) {
+            fs::path target(item.path);
+            fs::path folder = target.parent_path();
+
+            // Never above where the explorer starts
+            if (!UserScope::isUnder(folder.native(), default_path.native()))
+                folder = target;
+
+            {
+                std::lock_guard<std::mutex> lock(data->menu_mutex);
+                *data->path = folder.string();
+                data->select_label = folder == target ? "" : target.filename().string();
+            }
+
+            {
+                std::lock_guard<std::mutex> lock(data->cv_mutex);
+                data->menu_path_changed = true;
+                data->pie_path_changed = true;
+            }
+            data->cv.notify_all();
+
+            show_quota = false;
+            show_cleanup = false;
+        },
+        [&] { show_cleanup = false; });
+
     window |= Modal(confirm_modal, &show_confirm_modal);
     window |= Modal(error_modal, &show_error_modal);
+    window |= Modal(cleanup_component, &show_cleanup);
+
+    auto modal_open = [&] { return show_confirm_modal || show_error_modal || show_cleanup; };
 
     // Quit with q, allow sidebar resize with arrow keys
     auto app = CatchEvent(window, [&](Event event) {
@@ -369,20 +425,35 @@ int main(int argc, char* argv[]) {
             return true;
         }
 
-        if ((event == Event::Character('u') || event == Event::Character('U')) && !show_confirm_modal && !show_error_modal) {
+        if ((event == Event::Character('u') || event == Event::Character('U')) && !modal_open()) {
             show_quota = !show_quota;
             if (show_quota) quotas.refresh();
             return true;
         }
 
-        if ((event == Event::Character('r') || event == Event::Character('R')) && !show_confirm_modal && !show_error_modal) {
+        if ((event == Event::Character('r') || event == Event::Character('R')) && !modal_open()) {
             quotas.refresh();
             return true;
         }
 
-        // Size or file count: the menu and the pie are listed again with the other metric
-        if ((event == Event::Character('f') || event == Event::Character('F')) && !show_confirm_modal && !show_error_modal) {
-            scanner.setMetric(scanner.getMetric() == Scanner::Metric::BYTES ? Scanner::Metric::INODES : Scanner::Metric::BYTES);
+        if ((event == Event::Character('c') || event == Event::Character('C')) && !modal_open()) {
+            BonsaiCleanup::fill(*cleanup_state, scanner);
+            show_cleanup = true;
+            return true;
+        }
+
+        // Size, size on disk, file count: the menu and the pie are listed again with the next metric
+        if ((event == Event::Character('f') || event == Event::Character('F')) && !modal_open()) {
+            const Scanner::Metric metric = scanner.getMetric();
+            scanner.setMetric(metric == Scanner::Metric::BYTES ? Scanner::Metric::DISK
+                            : metric == Scanner::Metric::DISK ? Scanner::Metric::INODES : Scanner::Metric::BYTES);
+
+            // The list is sorted again: the same entry stays selected
+            {
+                std::lock_guard<std::mutex> lock(data->menu_mutex);
+                if (*data->selected >= 0 && *data->selected < static_cast<int>(data->menu_entries->size()))
+                    data->select_label = (*data->menu_entries)[*data->selected].label;
+            }
 
             {
                 std::lock_guard<std::mutex> lock(data->cv_mutex);
@@ -394,12 +465,12 @@ int main(int argc, char* argv[]) {
             return true;
         }
 
-        if(event == Event::ArrowRight && !show_confirm_modal && !show_error_modal) {
+        if(event == Event::ArrowRight && !modal_open()) {
             config.SIDEBAR_WIDTH += 1;
             return true;
         }
 
-        if(event == Event::ArrowLeft && !show_confirm_modal && !show_error_modal) {
+        if(event == Event::ArrowLeft && !modal_open()) {
             config.SIDEBAR_WIDTH = std::max(20, config.SIDEBAR_WIDTH - 1);
             return true;
         }
@@ -413,6 +484,29 @@ int main(int argc, char* argv[]) {
       since its colors were already rounded to the wrong mode.
     */
     auto root = Renderer(app, [&] {
+        // An entry the cleanup view asked for: selected as soon as the menu lists it
+        {
+            std::lock_guard<std::mutex> lock(data->menu_mutex);
+
+            if (!data->select_label.empty()) {
+                for (size_t i = 0; i < data->menu_entries->size(); i++) {
+                    if ((*data->menu_entries)[i].label != data->select_label)
+                        continue;
+
+                    selected = static_cast<int>(i);
+                    *data->selected = selected;
+                    data->select_label.clear();
+
+                    {
+                        std::lock_guard<std::mutex> cv_lock(data->cv_mutex);
+                        data->pie_sel_changed = true;
+                    }
+                    data->cv.notify_all();
+                    break;
+                }
+            }
+        }
+
         if (colors && ftxui::Terminal::ColorSupport() != *colors) {
             ftxui::Terminal::SetColorSupport(*colors);
 

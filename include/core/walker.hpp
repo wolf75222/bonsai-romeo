@@ -12,6 +12,8 @@ Explanation:
     - Symlinks are skipped, so are sockets, pipes and devices.
     - /proc, /sys and network shares (NFS, SMB) are not entered.
     - A directory is only counted once, even if it is reachable twice (bind mounts).
+    - A file with several hard links is only counted once, like the GPFS quotas do.
+- Along the way it keeps the largest files and the core dumps it sees, for the cleanup view.
 - ROMEO: the scan is limited to the user's scope (see UserScope):
     - Above the user's spaces, only the directories leading to them are kept, no file is counted.
     - Inside them, only files owned by the user are counted.
@@ -25,6 +27,7 @@ Explanation:
 #include <atomic>
 #include <mutex>
 #include <sys/types.h>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -35,6 +38,25 @@ public:
 
     // Scans the whole tree. Returns when every directory was visited, or once `stop` is set.
     void run();
+
+    // A file seen during the scan, kept for the cleanup view
+    struct FileHit {
+        uint64_t disk;     // Bytes allocated on disk
+        uint64_t bytes;    // Apparent size
+        uint32_t dir;      // Directory node it is in
+        std::string name;
+        int64_t mtime;
+    };
+
+    struct Findings {
+        std::vector<FileHit> largest;  // The LARGEST_FILES biggest files of the user, biggest first
+        std::vector<FileHit> cores;    // Core dumps ("core", "core.1234")
+    };
+
+    static constexpr size_t LARGEST_FILES = 50;
+
+    // What all the threads found. Call after run().
+    Findings findings();
 
 private:
     struct Task {
@@ -59,10 +81,13 @@ private:
         std::vector<Task> stolen;
         std::string path;
         std::string child;          // Path of a sub-directory, to check it against the scope
+
+        std::vector<FileHit> largest;  // Min-heap on `disk`, at most LARGEST_FILES
+        std::vector<FileHit> cores;
     };
 
     /* Seen
-    - Directories already visited, as (device, inode).
+    - Directories already visited, and files with several hard links already counted, as (device, inode).
     - Split in buckets with their own lock so threads rarely wait for each other.
     */
     struct Inode {
@@ -89,6 +114,7 @@ private:
 
     void work(unsigned self);
     void visit(const Task& task, unsigned self, Scratch& scratch);
+    static void remember(Scratch& scratch, uint32_t dir, const char* name, uint64_t disk, uint64_t bytes, int64_t mtime);
 
     bool pop(unsigned self, Task& task);
     bool steal(unsigned self, Task& task, Scratch& scratch);
@@ -105,4 +131,8 @@ private:
 
     // Tasks queued or being worked on. The scan is over when this reaches zero.
     std::atomic<uint64_t> pending{0};
+
+    // Each thread adds what it found when it is done
+    std::mutex findings_mutex;
+    Findings merged;
 };

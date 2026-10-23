@@ -48,6 +48,7 @@ public:
     int CHART_MIN_SLICES = 10;
     int SIDEBAR_WIDTH = 40;
     int SCANNER_THREADS = 0;
+    int CLEANUP_OLD_DAYS = 180;
 
     double SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE = 0.2;
     double CHART_MAX_SIZE_THRESHOLD_PERCENTAGE = 2;
@@ -325,6 +326,7 @@ private:
             {"ENABLE_FOLDER_SIZE_PERCENTAGES",      makeSetter(&Config::ENABLE_FOLDER_SIZE_PERCENTAGES),      true},
             {"SCANNER_THREADS",                     makeSetter(&Config::SCANNER_THREADS),                     true},
             {"COLOR_MODE",                          makeSetter(&Config::COLOR_MODE),                          true},
+            {"CLEANUP_OLD_DAYS",                    makeSetter(&Config::CLEANUP_OLD_DAYS),                    true},
         };
         return table;
     }

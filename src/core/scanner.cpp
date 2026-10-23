@@ -1,45 +1,180 @@
 #include "../../include/core/scanner.hpp"
 
 #include "../../include/config/config.hpp"
-#include "../../include/core/walker.hpp"
 #include "../../include/utils/format.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
+#include <sys/stat.h>
+#include <thread>
+#include <type_traits>
+#include <unistd.h>
 
-void Scanner::loadSnapshot() {
+namespace {
+
+// First line of the cache file. Older caches have "path<TAB>bytes" lines and no header
+constexpr const char* CACHE_HEADER = "# bonsai-romeo cache 2: path, bytes, disk, inodes, newest";
+
+// Small folders aren't cached: they would make the file big for little use
+constexpr uint64_t CACHE_MIN_DISK = 1024 * 1024;
+constexpr uint64_t CACHE_MIN_INODES = 500;
+
+constexpr uint64_t MIB = 1024 * 1024;
+constexpr uint64_t GIB = 1024 * MIB;
+
+/* Folders that can be cleaned
+- name: folder name; parent: name of the folder it must be in (nullptr: anywhere); prefix: name only has to start with it
+- The first match wins and nothing below it is suggested again
+*/
+struct Junk {
+    const char* name;
+    const char* parent;
+    bool prefix;
+    const char* kind;
+    const char* hint;
+};
+
+const Junk JUNK[] = {
+    {".cache",            nullptr,       false, "cache",          "Caches of many tools (pip, huggingface, matplotlib...): rebuilt when needed"},
+    {"__pycache__",       nullptr,       false, "cache",          "Python bytecode: rebuilt automatically"},
+    {".pytest_cache",     nullptr,       false, "cache",          "pytest cache: rebuilt automatically"},
+    {".mypy_cache",       nullptr,       false, "cache",          "mypy cache: rebuilt automatically"},
+    {".ruff_cache",       nullptr,       false, "cache",          "ruff cache: rebuilt automatically"},
+    {".ipynb_checkpoints",nullptr,       false, "cache",          "Jupyter checkpoints of your notebooks"},
+    {".ccache",           nullptr,       false, "cache",          "ccache: ccache -C"},
+    {".nv",               nullptr,       false, "cache",          "CUDA compute cache: rebuilt by the driver"},
+    {".triton",           nullptr,       false, "cache",          "Triton kernel cache: rebuilt when needed"},
+    {".npm",              nullptr,       false, "cache",          "npm cache: npm cache clean --force"},
+    {".yarn",             nullptr,       false, "cache",          "yarn cache: yarn cache clean"},
+    {"registry",          ".cargo",      false, "cache",          "Cargo registry: downloaded again when needed"},
+    {"cache",             "pkgs",        false, "conda cache",    "Conda channel indexes (repodata), downloaded again when needed: conda clean -i"},
+    {"pkgs",              ".conda",      false, "conda packages", "Downloaded conda packages: conda clean -a"},
+    {"pkgs",              "miniconda3",  false, "conda packages", "Downloaded conda packages: conda clean -a"},
+    {"pkgs",              "anaconda3",   false, "conda packages", "Downloaded conda packages: conda clean -a"},
+    {"pkgs",              "miniforge3",  false, "conda packages", "Downloaded conda packages: conda clean -a"},
+    {"pkgs",              "mambaforge",  false, "conda packages", "Downloaded conda packages: conda clean -a"},
+    {"cache",             ".apptainer",  false, "apptainer cache","Image layers: apptainer cache clean"},
+    {"cache",             ".singularity",false, "apptainer cache","Image layers: singularity cache clean"},
+    {"cache",             ".spack",      false, "spack cache",    "Spack downloads and caches: spack clean -a"},
+    {"node_modules",      nullptr,       false, "dependencies",   "JavaScript dependencies: reinstalled by npm install"},
+    {".tox",              nullptr,       false, "test envs",      "tox environments: rebuilt by tox"},
+    {".nox",              nullptr,       false, "test envs",      "nox environments: rebuilt by nox"},
+    {".venv",             nullptr,       false, "python env",     "Virtual env: recreated with python -m venv and pip install"},
+    {"venv",              nullptr,       false, "python env",     "Virtual env: recreated with python -m venv and pip install"},
+    {"CMakeFiles",        nullptr,       false, "build",          "CMake build files: rebuilt by cmake"},
+    {"cmake-build-",      nullptr,       true,  "build",          "Build folder: rebuilt by your build"},
+    {"build",             nullptr,       false, "build",          "Build folder: rebuilt by your build (check it holds no results)"},
+    {"_build",            nullptr,       false, "build",          "Build folder: rebuilt by your build"},
+    {"lightning_logs",    nullptr,       false, "ML logs",        "PyTorch Lightning logs and checkpoints"},
+    {".vscode-server",    nullptr,       false, "editor server",  "VS Code server: reinstalled on the next connection"},
+    {".cursor-server",    nullptr,       false, "editor server",  "Cursor server: reinstalled on the next connection"},
+    {"Trash",             "share",       false, "trash",          "Desktop trash: empty it"},
+};
+
+const Junk* junk(const std::string& path) {
+    const size_t slash = path.rfind('/');
+    const std::string_view name = std::string_view(path).substr(slash + 1);
+
+    std::string_view parent;
+    if (slash != std::string::npos && slash > 0) {
+        const size_t before = path.rfind('/', slash - 1);
+        parent = std::string_view(path).substr(before + 1, slash - before - 1);
+    }
+
+    for (const Junk& j : JUNK) {
+        const bool name_matches = j.prefix ? name.substr(0, std::strlen(j.name)) == j.name : name == j.name;
+        if (name_matches && (!j.parent || parent == j.parent))
+            return &j;
+    }
+
+    return nullptr;
+}
+
+}
+
+void Scanner::loadCache() {
     std::ifstream in(this->db_path);
-
-    auto config = Config::get();
-    if (!in.is_open() || !config.ENABLE_FOLDER_SIZE_PERCENTAGES) return;
-
     std::string line;
-    while (std::getline(in, line)) {
+    bool v2 = false;
+
+    auto number = [](std::string_view s, auto& out) {
+        try {
+            out = static_cast<std::remove_reference_t<decltype(out)>>(std::stoll(std::string(s)));
+            return true;
+        } catch (const std::exception&) {
+            return false;
+        }
+    };
+
+    while (in.is_open() && std::getline(in, line)) {
         if (line.empty()) continue;
 
-        auto tabPos = line.rfind('\t');
-        if (tabPos == std::string::npos) continue;
-
-        std::string path = line.substr(0, tabPos);
-        std::string sizeStr = line.substr(tabPos + 1);
-        try {
-            uint64_t size = std::stoull(sizeStr);
-
-            // Directories that no longer exist are dropped
-            uint32_t id = tree.find(path);
-            if (id != DirTree::NONE)
-                tree.node(id).snapped.store(size, std::memory_order_relaxed);
-        } catch (const std::exception&) {
+        if (line[0] == '#') {
+            v2 = v2 || line == CACHE_HEADER;
             continue;
         }
+
+        // Numbers are taken from the end: a path may hold any character
+        Cached c{0, 0, 0, 0};
+        size_t end = line.size();
+        const int fields = v2 ? 4 : 1;
+        std::string_view parts[4];
+        bool ok = true;
+
+        for (int i = fields - 1; i >= 0 && ok; i--) {
+            const size_t tab = line.rfind('\t', end - 1);
+            if (tab == std::string::npos || tab == 0) { ok = false; break; }
+            parts[i] = std::string_view(line).substr(tab + 1, end - tab - 1);
+            end = tab;
+        }
+
+        if (!ok) continue;
+
+        if (v2) {
+            ok = number(parts[0], c.bytes) && number(parts[1], c.disk) && number(parts[2], c.inodes) && number(parts[3], c.newest);
+        } else {
+            ok = number(parts[0], c.bytes);
+        }
+
+        if (ok)
+            cache[line.substr(0, end)] = c;
+    }
+
+    cache_ready.store(true, std::memory_order_release);
+}
+
+const Scanner::Cached* Scanner::cached(const std::string& path) const {
+    if (!cache_ready.load(std::memory_order_acquire))
+        return nullptr;
+
+    auto it = cache.find(path);
+    return it == cache.end() ? nullptr : &it->second;
+}
+
+bool Scanner::coveredByScan(const std::string& p) {
+    if (scope.relation(p) == UserScope::Relation::OUTSIDE)
+        return false;
+
+    // The deepest folder of the tree on the way to `p`: if it is complete, `p` was written, or it is gone
+    std::string probe = p;
+    while (true) {
+        const uint32_t id = tree.find(probe);
+        if (id != DirTree::NONE)
+            return tree.node(id).complete.load(std::memory_order_acquire);
+
+        const size_t slash = probe.rfind('/');
+        if (slash == std::string::npos || slash == 0)
+            return false;
+
+        probe.resize(slash);
     }
 }
 
 void Scanner::snapshot() {
-    auto config = Config::get();
-    if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return;
-
     std::lock_guard<std::mutex> lock(snapshot_mutex);
 
     std::error_code ec;
@@ -47,48 +182,120 @@ void Scanner::snapshot() {
         fs::create_directories(this->db_path.parent_path(), ec);
     }
 
-    std::ofstream out(this->db_path, std::ios::trunc);
+    // Written next to it, then renamed: a crash or a second bonsai never leaves half a cache
+    const fs::path tmp = this->db_path.string() + "." + std::to_string(getpid()) + ".tmp";
+    std::ofstream out(tmp, std::ios::trunc);
     if (!out.is_open()) return;
 
-    tree.forEach([&out](const std::string& path, const DirTree::Node& dir) {
-        uint64_t size = dir.size.load(std::memory_order_relaxed);
+    out << CACHE_HEADER << '\n';
 
-        // An empty directory reads back as 0 anyway
-        if (size != 0) {
-            out << path << '\t' << size << '\n';
-        }
+    // 1. What this scan found, for the folders it scanned completely
+    tree.forEach([&out](const std::string& path, const DirTree::Node& dir) {
+        if (!dir.complete.load(std::memory_order_acquire))
+            return;
+
+        const uint64_t disk = dir.disk.load(std::memory_order_relaxed);
+        const uint64_t inodes = dir.inodes.load(std::memory_order_relaxed);
+        if (disk < CACHE_MIN_DISK && inodes < CACHE_MIN_INODES)
+            return;
+
+        out << path << '\t' << dir.size.load(std::memory_order_relaxed) << '\t' << disk << '\t' << inodes
+            << '\t' << dir.newest.load(std::memory_order_relaxed) << '\n';
     });
+
+    // 2. The rest of the previous cache: other spaces, or folders this scan didn't finish
+    if (cache_ready.load(std::memory_order_acquire)) {
+        for (const auto& [path, c] : cache) {
+            if (!coveredByScan(path))
+                out << path << '\t' << c.bytes << '\t' << c.disk << '\t' << c.inodes << '\t' << c.newest << '\n';
+        }
+    }
+
+    out.close();
+    if (out.good())
+        fs::rename(tmp, this->db_path, ec);
+    if (ec || !out.good())
+        fs::remove(tmp, ec);
+}
+
+Scanner::Totals Scanner::totals(const fs::path& path) {
+    Totals t;
+
+    const uint32_t id = tree.find(path.native());
+    if (id != DirTree::NONE) {
+        const DirTree::Node& n = tree.node(id);
+
+        t.final = n.complete.load(std::memory_order_acquire);
+        t.bytes = n.size.load(std::memory_order_relaxed);
+        t.disk = n.disk.load(std::memory_order_relaxed);
+        t.inodes = n.inodes.load(std::memory_order_relaxed);
+        t.newest = n.newest.load(std::memory_order_relaxed);
+        t.known = true;
+
+        if (t.final)
+            return t;
+    }
+
+    // Still being scanned: the previous scan's totals, never below what this one found so far
+    if (!done.load()) {
+        if (const Cached* c = cached(path.native())) {
+            t.bytes = std::max(t.bytes, c->bytes);
+            t.disk = std::max(t.disk, c->disk);
+            t.inodes = std::max(t.inodes, c->inodes);
+            t.newest = std::max(t.newest, c->newest);
+            t.known = true;
+        }
+    }
+
+    return t;
+}
+
+uint64_t Scanner::value(const Totals& t) const {
+    switch (metric.load()) {
+        case Metric::DISK:   return t.disk;
+        case Metric::INODES: return t.inodes;
+        case Metric::BYTES:
+        default:             return t.bytes;
+    }
 }
 
 uint64_t Scanner::get(const fs::path& path) {
-    return metric == Metric::INODES ? getInodes(path) : getBytes(path);
+    return value(totals(path));
 }
 
-uint64_t Scanner::getBytes(const fs::path& path) {
-    uint32_t id = tree.find(path.native());
+uint64_t Scanner::getSnapped(const fs::path& path) {
+    if (!Config::get().ENABLE_FOLDER_SIZE_PERCENTAGES)
+        return 0;
 
-    if (id != DirTree::NONE)
-        return tree.node(id).size.load(std::memory_order_relaxed);
+    // Growth only makes sense against final totals
+    const uint32_t id = tree.find(path.native());
+    if (id == DirTree::NONE || !tree.node(id).complete.load(std::memory_order_acquire))
+        return 0;
 
-    return 0;
-}
+    const Cached* c = cached(path.native());
+    if (!c)
+        return 0;
 
-uint64_t Scanner::getInodes(const fs::path& path) {
-    uint32_t id = tree.find(path.native());
-
-    if (id != DirTree::NONE)
-        return tree.node(id).inodes.load(std::memory_order_relaxed);
-
-    return 0;
+    return value(Totals{c->bytes, c->disk, c->inodes, c->newest, true, true});
 }
 
 uint64_t Scanner::fileValue(const fs::directory_entry& entry) {
-    if (metric == Metric::INODES)
-        return 1;
+    switch (metric.load()) {
+        case Metric::INODES:
+            return 1;
 
-    std::error_code ec;
-    uint64_t size = entry.file_size(ec);
-    return ec ? 0 : size;
+        case Metric::DISK: {
+            struct stat st;
+            return lstat(entry.path().c_str(), &st) == 0 ? static_cast<uint64_t>(st.st_blocks) * 512 : 0;
+        }
+
+        case Metric::BYTES:
+        default: {
+            std::error_code ec;
+            uint64_t size = entry.file_size(ec);
+            return ec ? 0 : size;
+        }
+    }
 }
 
 std::string Scanner::formatShort(uint64_t value) {
@@ -99,18 +306,6 @@ std::string Scanner::format(uint64_t value, const std::string& spacer) {
     return metric == Metric::INODES ? FormatUtils::toCount(value, spacer) : FormatUtils::toReadable(value, spacer);
 }
 
-uint64_t Scanner::getSnapped(const fs::path& path) {
-    auto config = Config::get();
-    if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES || metric == Metric::INODES) return 0;
-
-    uint32_t id = tree.find(path.native());
-
-    if (id != DirTree::NONE)
-        return tree.node(id).snapped.load(std::memory_order_relaxed);
-
-    return 0;
-}
-
 bool Scanner::visible(const fs::directory_entry& entry) {
     std::error_code ec;
 
@@ -118,17 +313,98 @@ bool Scanner::visible(const fs::directory_entry& entry) {
         return false;
 
     if (entry.is_directory(ec)) {
-        uint32_t id = tree.find(entry.path().native());
-        if (id == DirTree::NONE)
+        const Totals t = totals(entry.path());
+        if (!t.known)
             return false;
 
-        const DirTree::Node& node = tree.node(id);
-        return node.size.load(std::memory_order_relaxed) > 0 || node.inodes.load(std::memory_order_relaxed) > 0 || scope.owns(entry.path());
+        return t.bytes > 0 || t.inodes > 0 || scope.owns(entry.path());
     }
 
     return scope.relation(entry.path().native()) == UserScope::Relation::INSIDE
         && scope.relation(entry.path().parent_path().native()) == UserScope::Relation::INSIDE
         && scope.owns(entry.path());
+}
+
+std::string Scanner::filePath(uint32_t dir, const std::string& name) const {
+    std::string out;
+    tree.path(dir, out);
+    if (out != "/") out += '/';
+    return out + name;
+}
+
+std::vector<Scanner::CleanupItem> Scanner::cleanup() {
+    std::vector<CleanupItem> items;
+
+    const int64_t now = std::time(nullptr);
+    const int64_t old_after = static_cast<int64_t>(std::max(1, Config::get().CLEANUP_OLD_DAYS)) * 86400;
+
+    // Folders: the first match on the way down wins, nothing below it is suggested again
+    tree.walk([&](const std::string& path, const DirTree::Node& node) {
+        if (scope.relation(path) != UserScope::Relation::INSIDE)
+            return true;
+
+        const uint64_t disk = node.disk.load(std::memory_order_relaxed);
+        const uint64_t inodes = node.inodes.load(std::memory_order_relaxed);
+        const int64_t newest = node.newest.load(std::memory_order_relaxed);
+
+        // Nothing of the user below it
+        if (disk == 0 && inodes == 0)
+            return false;
+
+        if (const Junk* j = junk(path)) {
+            if (disk >= MIB || inodes >= 1000)
+                items.push_back(CleanupItem{path, j->kind, j->hint, disk, inodes, newest, false});
+            return false;
+        }
+
+        if (disk >= GIB && newest > 0 && now - newest > old_after) {
+            items.push_back(CleanupItem{path, "old data", "Nothing changed in it for " + FormatUtils::toAge(now - newest)
+                                        + ": archive it elsewhere (no backups on ROMEO) or delete it", disk, inodes, newest, false});
+            return false;
+        }
+
+        return true;
+    });
+
+    // Files: core dumps and the largest files
+    {
+        std::lock_guard<std::mutex> lock(findings_mutex);
+
+        for (const auto& hit : findings.cores)
+            items.push_back(CleanupItem{filePath(hit.dir, hit.name), "core dump", "Memory dump of a crashed program: safe to delete", hit.disk, 1, hit.mtime, true});
+
+        for (const auto& hit : findings.largest) {
+            if (hit.disk < 100 * MIB) break;
+            items.push_back(CleanupItem{filePath(hit.dir, hit.name), "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
+        }
+    }
+
+    std::stable_sort(items.begin(), items.end(), [](const CleanupItem& a, const CleanupItem& b) {
+        return a.disk > b.disk;
+    });
+
+    // A large file inside a suggested folder is already covered by it
+    std::vector<bool> covered(items.size(), false);
+    for (size_t i = 0; i < items.size(); i++) {
+        if (!items[i].is_file) continue;
+
+        const std::string& file = items[i].path;
+        covered[i] = std::any_of(items.begin(), items.end(), [&file](const CleanupItem& other) {
+            return !other.is_file && file.size() > other.path.size()
+                && file.compare(0, other.path.size(), other.path) == 0 && file[other.path.size()] == '/';
+        });
+    }
+
+    std::vector<CleanupItem> kept;
+    for (size_t i = 0; i < items.size(); i++) {
+        if (!covered[i])
+            kept.push_back(std::move(items[i]));
+    }
+
+    if (kept.size() > 300)
+        kept.resize(300);
+
+    return kept;
 }
 
 Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
@@ -141,21 +417,25 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         return ScannerRemoveResult{"This isn't yours: only your own files can be removed.", true};
     }
 
-    uint64_t removed_size = 0;
-    uint64_t removed_inodes = 1;
+    DirTree::Counts removed;
     uint32_t removed_dir = DirTree::NONE;
 
     if(fs::is_directory(path)) {
         removed_dir = tree.find(path.native());
 
         if (removed_dir != DirTree::NONE) {
-            removed_size = tree.node(removed_dir).size.load();
-            removed_inodes = tree.node(removed_dir).inodes.load();
+            const DirTree::Node& node = tree.node(removed_dir);
+            removed.bytes = node.size.load();
+            removed.disk = node.disk.load();
+            removed.inodes = node.inodes.load();
         }
     } else {
-        std::error_code ec;
-        removed_size = fs::file_size(path, ec);
-        if (ec) removed_size = 0;
+        struct stat st;
+        if (lstat(path.c_str(), &st) == 0) {
+            removed.bytes = S_ISREG(st.st_mode) ? static_cast<uint64_t>(st.st_size) : 0;
+            removed.disk = static_cast<uint64_t>(st.st_blocks) * 512;
+            removed.inodes = 1;
+        }
     }
 
     std::error_code ec;
@@ -175,8 +455,7 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     uint32_t parent = tree.find(path.parent_path().native());
 
     if (parent != DirTree::NONE) {
-        tree.subtract(parent, removed_size);
-        tree.subtractInodes(parent, removed_inodes);
+        tree.subtract(parent, removed);
     }
 
     if (removed_dir != DirTree::NONE) {
@@ -188,10 +467,23 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
 }
 
 void Scanner::scan() {
-    Walker walker(tree, scope, done, std::max(0, Config::get().SCANNER_THREADS));
+    // The previous scan is read while this one starts: it only delays what is shown, never the scan
+    std::thread loader(&Scanner::loadCache, this);
+
+    // BONSAI_THREADS overrides the config, e.g. to use more threads inside a job
+    int threads = Config::get().SCANNER_THREADS;
+    if (const char* env = std::getenv("BONSAI_THREADS"); env && *env)
+        threads = std::atoi(env);
+
+    Walker walker(tree, scope, done, std::max(0, threads));
     walker.run();
 
-    loadSnapshot();
+    {
+        std::lock_guard<std::mutex> lock(findings_mutex);
+        findings = walker.findings();
+    }
+
+    loader.join();
     this->done = true;
 }
 

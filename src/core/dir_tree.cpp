@@ -109,38 +109,57 @@ const DirTree::Block* DirTree::attach(uint32_t dir, const std::vector<char>& nam
     return block;
 }
 
-void DirTree::add(uint32_t dir, uint64_t bytes) {
-    if (bytes == 0)
-        return;
+void DirTree::add(uint32_t dir, const Counts& counts) {
+    bool newer = counts.newest != 0;
 
-    for (uint32_t id = dir; id != NONE; id = node(id).parent)
-        node(id).size.fetch_add(bytes, std::memory_order_relaxed);
-}
-
-void DirTree::subtract(uint32_t dir, uint64_t bytes) {
     for (uint32_t id = dir; id != NONE; id = node(id).parent) {
-        auto& size = node(id).size;
-        uint64_t current = size.load(std::memory_order_relaxed);
+        Node& n = node(id);
 
-        // Never go below zero: the disk may have changed since the scan
-        while (!size.compare_exchange_weak(current, current > bytes ? current - bytes : 0)) {}
+        if (counts.bytes) n.size.fetch_add(counts.bytes, std::memory_order_relaxed);
+        if (counts.disk) n.disk.fetch_add(counts.disk, std::memory_order_relaxed);
+        if (counts.inodes) n.inodes.fetch_add(counts.inodes, std::memory_order_relaxed);
+
+        /* Newest modification
+        - Once a directory already holds something as recent, so do the ones above it (or the thread
+          that wrote it is on its way up), so the rest of the walk can skip it
+        */
+        if (newer) {
+            int64_t current = n.newest.load(std::memory_order_relaxed);
+            while (counts.newest > current && !n.newest.compare_exchange_weak(current, counts.newest, std::memory_order_relaxed)) {}
+            newer = counts.newest > current;
+        }
     }
 }
 
-void DirTree::addInodes(uint32_t dir, uint64_t count) {
-    if (count == 0)
-        return;
+void DirTree::subtract(uint32_t dir, const Counts& counts) {
+    // Never go below zero: the disk may have changed since the scan
+    auto take = [](std::atomic<uint64_t>& value, uint64_t amount) {
+        uint64_t current = value.load(std::memory_order_relaxed);
+        while (!value.compare_exchange_weak(current, current > amount ? current - amount : 0)) {}
+    };
 
-    for (uint32_t id = dir; id != NONE; id = node(id).parent)
-        node(id).inodes.fetch_add(count, std::memory_order_relaxed);
+    for (uint32_t id = dir; id != NONE; id = node(id).parent) {
+        take(node(id).size, counts.bytes);
+        take(node(id).disk, counts.disk);
+        take(node(id).inodes, counts.inodes);
+    }
 }
 
-void DirTree::subtractInodes(uint32_t dir, uint64_t count) {
-    for (uint32_t id = dir; id != NONE; id = node(id).parent) {
-        auto& inodes = node(id).inodes;
-        uint64_t current = inodes.load(std::memory_order_relaxed);
+void DirTree::listed(uint32_t dir, uint32_t subdirs) {
+    if (subdirs > 0) {
+        node(dir).pending.store(subdirs, std::memory_order_release);
+        return;
+    }
 
-        while (!inodes.compare_exchange_weak(current, current > count ? current - count : 0)) {}
+    // Complete, then every parent whose last incomplete sub-directory this was
+    for (uint32_t id = dir; id != NONE;) {
+        node(id).complete.store(true, std::memory_order_release);
+
+        const uint32_t parent = node(id).parent;
+        if (parent == NONE || node(parent).pending.fetch_sub(1, std::memory_order_acq_rel) != 1)
+            return;
+
+        id = parent;
     }
 }
 
@@ -220,6 +239,13 @@ void DirTree::path(uint32_t id, std::string& out) const {
 }
 
 void DirTree::forEach(const std::function<void(const std::string&, const Node&)>& fn) const {
+    walk([&fn](const std::string& path, const Node& dir) {
+        fn(path, dir);
+        return true;
+    });
+}
+
+void DirTree::walk(const std::function<bool(const std::string&, const Node&)>& fn) const {
     struct Frame {
         uint32_t id;
         size_t path_length; // Length of the parent's path
@@ -245,7 +271,8 @@ void DirTree::forEach(const std::function<void(const std::string&, const Node&)>
             current += frame.name;
         }
 
-        fn(current.empty() ? slash : current, dir);
+        if (!fn(current.empty() ? slash : current, dir))
+            continue;
 
         const Block* block = dir.children.load(std::memory_order_acquire);
         if (!block)

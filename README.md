@@ -10,15 +10,25 @@ What changes compared to upstream:
   for every project group you belong to (`id -Gn`). Everything else on GPFS is skipped.
 - **Only your files are counted and listed**: in shared `/project/<group>` folders, other
   members' files are invisible, and their folders only appear if they contain files of yours.
+- **Numbers that match the quotas**: files with several hard links (conda environments, git,
+  spack...) are counted once, like GPFS does, and `F` switches between apparent size, size on
+  disk (what the space quota counts) and number of files (what the file quota counts).
+- **Instant start**: the previous scan is cached (`~/.cache/bonsai-romeo/db.txt`). Its sizes are
+  shown right away, marked `~`, and each folder switches to its new size once it is scanned.
+  Scanning one folder only updates that part of the cache.
+- **Cleanup suggestions** (key `C`, or `bonsai-romeo --cleanup`): caches and rebuildable folders
+  (pip, conda, spack, apptainer caches, `__pycache__`, `node_modules`, build folders, virtual
+  envs...), big folders untouched for 6 months, core dumps and your largest files, biggest first,
+  with how to clean each one. `TAB` filters by kind, `ENTER` opens the entry in the explorer.
 - **Quota dashboard** (key `U`, or `bonsai-romeo --quota`): your GPFS quotas with gauges, for
   space *and* number of files, same rules as ROMEO's `/apps/romeotools/myquotas.sh`.
-- **File-count mode** (key `F`): the sidebar and the pie show how many files/directories each
-  folder holds instead of its size, to find what eats your file quota.
+- **Faster scan on GPFS**: up to 32 threads (measured: 33 s with upstream's 16, 26 s with 32, for
+  1.5 million files), one pass up the tree per folder, no stat above your spaces.
 - **Deleting is limited to what you own**, inside your spaces.
 - Columns stay aligned in any terminal (ASCII icons, UTF-8 aware truncation), and the pie keeps its
-  24-bit colors through SSH.
-- `bonsai-romeo --summary [path]`: scan, print size and file count of each space, exit (no UI).
-- `BONSAI_ROOTS=dir1:dir2 bonsai-romeo` overrides the detected spaces.
+  24-bit colors through SSH and stays round whatever the font.
+- `bonsai-romeo --summary [path]`: scan, print size, size on disk and file count of each space.
+- `BONSAI_ROOTS=dir1:dir2` overrides the detected spaces, `BONSAI_THREADS=n` the thread count.
 - Own config and cache (`~/.config/bonsai-romeo/`, `~/.cache/bonsai-romeo/`), no `xxd` needed to build.
 
 > [!WARNING]
@@ -43,13 +53,15 @@ frees the build files. The binary is x86_64: it runs on the login nodes and the 
 bonsai-romeo                       # all your spaces
 bonsai-romeo /project/r250127      # one project, only your files in it
 bonsai-romeo --quota               # quotas only, no UI
+bonsai-romeo --cleanup             # what could be cleaned, no UI
 bonsai-romeo --summary             # sizes and file counts, no UI
 ```
 
 | Key | Action |
 |-----|--------|
+| `F` | size / size on disk / number of files |
+| `C` | cleanup suggestions (`TAB` kind, `ENTER` open, `ESC` close) |
 | `U` | quota dashboard / back to the pie chart |
-| `F` | switch between size and file count |
 | `R` | refresh the quotas |
 | `D` (or `SUPPR`) | delete the selected entry (yours only), after a confirmation |
 | `âŒ«` / `ESC` | go up a folder |
@@ -69,8 +81,8 @@ On a Mac keyboard `âŒ«` is Backspace (go up), not delete: use `D` (or `fn` + `âŒ
 - Files you put in a project folder must belong to the project group. Files left with your
   personal group (copied from elsewhere) aren't counted on the project and can make your writes
   fail: the dashboard detects them and shows the `chgrp` commands to fix it.
-- The gauge is scaled to the hard limit, `|` marks the soft limit. Quota usage is counted in GPFS
-  blocks, while the explorer shows apparent sizes (sum of file sizes): the two can differ.
+- The gauge is scaled to the hard limit, `|` marks the soft limit. Quotas count blocks on disk:
+  press `F` in the explorer for the size on disk, which matches them (hard links counted once).
 
 ### Terminal compatibility
 
@@ -91,7 +103,8 @@ On a Mac keyboard `âŒ«` is Backspace (go up), not delete: use `D` (or `fn` + `âŒ
   `BONSAI_COLOR=256 bonsai-romeo`.
 - If the SSH connection drops, the program quits on its own instead of staying on the login node.
 
-A full scan walks GPFS metadata and can take a couple of minutes; sizes fill in live.
+A full scan walks GPFS metadata and takes a minute or two for a few million files; meanwhile the
+sizes of the previous scan are shown (marked `~`).
 
 ---
 

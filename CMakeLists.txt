@@ -22,6 +22,7 @@ set(SRC
     src/core/quota.cpp
     src/core/walker.cpp
 
+    src/ui/cleanup_view.cpp
     src/ui/menu.cpp
     src/ui/modal_confirm.cpp
     src/ui/modal_error.cpp

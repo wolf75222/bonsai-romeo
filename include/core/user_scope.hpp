@@ -20,6 +20,7 @@ Explanation:
 #include <pwd.h>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
@@ -33,11 +34,19 @@ public:
     uid_t uid = 0;
     std::vector<std::string> roots; // Real paths, without trailing slash
 
+    // How the user knows each space: (real path, shown as), e.g. ("/gpfs/home/bob", "~")
+    std::vector<std::pair<std::string, std::string>> aliases;
+
     static UserScope detect() {
         UserScope scope;
         scope.uid = getuid();
 
         std::vector<fs::path> candidates;
+
+        // Shown as "~" in paths, whatever the spaces come from
+        std::string home;
+        if (const passwd* pw = getpwuid(scope.uid); pw && pw->pw_dir)
+            home = fs::weakly_canonical(pw->pw_dir).string();
 
         if (const char* env = std::getenv("BONSAI_ROOTS"); env && *env) {
             std::string list(env);
@@ -80,6 +89,7 @@ public:
             if (ec) continue;
 
             scope.add(real);
+            scope.aliases.emplace_back(real, real == home ? "~" : candidate.string());
         }
 
         return scope;
@@ -117,6 +127,15 @@ public:
         }
 
         return common;
+    }
+
+    // A real path the way the user knows it: /gpfs/home/bob/x -> ~/x, /gpfs/projet/r1/x -> /project/r1/x
+    std::string display(const std::string& real) const {
+        for (const auto& [path, shown] : aliases) {
+            if (isUnder(real, path))
+                return shown + real.substr(path.size());
+        }
+        return real;
     }
 
     bool owns(const fs::path& path) const {

@@ -54,6 +54,25 @@ public:
         return oss.str();
     }
 
+    // A duration in a short format: 5 min, 3 h, 12 d, 7 mo, 1.4 y
+    static std::string toAge(int64_t seconds) {
+        if (seconds < 0) seconds = 0;
+
+        std::ostringstream oss;
+        if (seconds < 3600)
+            oss << seconds / 60 << " min";
+        else if (seconds < 86400)
+            oss << seconds / 3600 << " h";
+        else if (seconds < 60 * 86400)
+            oss << seconds / 86400 << " d";
+        else if (seconds < 365 * 86400)
+            oss << seconds / (30 * 86400) << " mo";
+        else
+            oss << std::fixed << std::setprecision(1) << seconds / (365.0 * 86400) << " y";
+
+        return oss.str();
+    }
+
     // A count in a short format: 987, 12.3k, 1.50M
     static std::string toCount(uintmax_t count, const std::string& spacer = "") {
         std::ostringstream oss;
@@ -103,6 +122,17 @@ public:
             }
         }
         return str.size();
+    }
+
+    // Keeps the start and the end (the file name) of a long path: /project/r1/.../releases/full-4bc/f.sqsh
+    static std::string trimMiddle(const std::string& str, size_t max_size) {
+        const size_t len = length(str);
+        if (len <= max_size || max_size < 8)
+            return len <= max_size ? str : trimSuffix(str, max_size, "...");
+
+        const size_t keep_end = (max_size - 3) * 2 / 3;
+        const size_t keep_start = max_size - 3 - keep_end;
+        return str.substr(0, offsetOf(str, keep_start)) + "..." + str.substr(offsetOf(str, len - keep_end));
     }
 
     // Cuts at `max_size` characters (not bytes: "é" is two bytes), ending with `suffix`

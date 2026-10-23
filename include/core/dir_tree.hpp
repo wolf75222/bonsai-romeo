@@ -9,6 +9,7 @@ Explanation:
     - A directory's block of children is published once, fully built, through an atomic pointer.
     - Sizes are atomics: scanner threads add to them, UI threads read them, nobody takes a lock.
 - A node's size is the total of its whole subtree. It grows while the scan is running.
+- A node is complete once it and everything below it was scanned: its totals are then final.
 */
 
 #pragma once
@@ -44,11 +45,22 @@ public:
 
     struct Node {
         std::atomic<uint64_t> size{0};            // Bytes in this directory and everything below it
-        std::atomic<uint64_t> snapped{0};         // Same, as saved by the previous run
+        std::atomic<uint64_t> disk{0};            // Same, as allocated on disk (blocks): what the GPFS quota counts
         std::atomic<uint64_t> inodes{0};          // Files and directories of the user below it (GPFS file quota)
+        std::atomic<int64_t> newest{0};           // Last modification (seconds since 1970) of the user's entries below it
+        std::atomic<uint32_t> pending{0};         // Sub-directories not complete yet
+        std::atomic<bool> complete{false};        // This directory and everything below it was scanned
         std::atomic<const Block*> children{nullptr}; // nullptr: not listed yet, or no sub-directories
         uint32_t parent = NONE;
         std::atomic<bool> removed{false};
+    };
+
+    // What one directory adds to itself and to every directory above it
+    struct Counts {
+        uint64_t bytes = 0;
+        uint64_t disk = 0;
+        uint64_t inodes = 0;
+        int64_t newest = 0;
     };
 
     explicit DirTree(const std::string& root_path);
@@ -66,13 +78,17 @@ public:
     */
     const Block* attach(uint32_t dir, const std::vector<char>& names, uint32_t count);
 
-    // Adds / removes `bytes` on `dir` and on every directory above it.
-    void add(uint32_t dir, uint64_t bytes);
-    void subtract(uint32_t dir, uint64_t bytes);
+    // Adds / removes `counts` on `dir` and on every directory above it (in one walk up).
+    void add(uint32_t dir, const Counts& counts);
+    void subtract(uint32_t dir, const Counts& counts);
 
-    // Same for the inode count
-    void addInodes(uint32_t dir, uint64_t count);
-    void subtractInodes(uint32_t dir, uint64_t count);
+    /* listed(dir, subdirs)
+    - Called once `dir` was read: `subdirs` of its sub-directories are queued.
+    - With none (or when it couldn't be read), `dir` is complete, and so is every directory above it
+      whose last incomplete sub-directory it was.
+    - Must be called before the sub-directories are queued, after `dir`'s own counts were added.
+    */
+    void listed(uint32_t dir, uint32_t subdirs);
 
     // Resolves an absolute path to its node, or NONE if it isn't a (known) directory under the root.
     uint32_t find(std::string_view path) const;
@@ -82,6 +98,9 @@ public:
 
     // Calls fn(path, node) for every directory, parents before children.
     void forEach(const std::function<void(const std::string&, const Node&)>& fn) const;
+
+    // Same, but the children of a directory are skipped when fn returns false for it.
+    void walk(const std::function<bool(const std::string&, const Node&)>& fn) const;
 
     uint32_t count() const;
 

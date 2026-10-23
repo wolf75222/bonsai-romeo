@@ -28,6 +28,7 @@ public:
         std::string path;
 
         bool is_dir;
+        bool final = true;   // false: from the previous scan, or still being scanned (shown with ~)
     };
 
     struct BonsaiPieEntry {
@@ -59,6 +60,9 @@ public:
 
         std::shared_ptr<std::string> path;
         std::shared_ptr<int> selected;
+
+        // Entry to select once the menu lists it (set when the cleanup view opens a path), under menu_mutex
+        std::string select_label;
 
         std::mutex cv_mutex;
         std::condition_variable cv;

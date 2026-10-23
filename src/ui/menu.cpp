@@ -45,8 +45,11 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
 
                 if (!item.is_dir) {
                     item.size = scanner->fileValue(entry);
+                    item.snapped_size = 0;
                 } else {
-                    item.size = scanner->get(entry.path());
+                    const Scanner::Totals totals = scanner->totals(entry.path());
+                    item.size = scanner->value(totals);
+                    item.final = totals.final;
                     item.snapped_size = scanner->getSnapped(entry.path());
                 }
 
@@ -189,7 +192,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
         - Fixed widths that always add up to the sidebar (minus its right margin), so every row lines up
         */
         const int width = std::max(*sidebar_width - 1, 12);
-        const int size_width = 6;                         // toCompact / toCount: 5 characters at most
+        const int size_width = 7;                         // "~" + toCompact / toCount (5 characters at most)
         const int growth_width = width >= 30 ? 8 : 0;     // " +12.3%"
         const int name_width = width - size_width - growth_width;
 
@@ -203,7 +206,8 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             hbox(
                 filler(),
-                text(item.label == ".." ? "" : scanner->formatShort(item.size)) | color(Color::GrayDark)
+                // "~": not final yet, from the previous scan or still being scanned
+                text(item.label == ".." ? "" : (item.final ? "" : "~") + scanner->formatShort(item.size)) | color(Color::GrayDark)
             ) | size(WIDTH, EQUAL, size_width)
         });
 
@@ -230,6 +234,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             *data->selected = *selected;
             *data->path = new_path;
+            data->select_label.clear();
         }
 
         {
