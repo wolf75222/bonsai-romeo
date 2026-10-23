@@ -60,7 +60,8 @@ private:
     Parameters:
         - cx, cy       -> Center of the ellipse.
         - r1, r2       -> Outer radii along X and Y axes (supports non-uniform scaling).
-        - r_inner      -> Inner radius (creates the hollow ring effect).
+        - r_inner      -> Inner radius along X (creates the hollow ring effect).
+                          The inner edge has the same shape as the outer one: r_inner / r1 of it.
         - start_deg    -> Starting angle in degrees.
         - sweep_deg    -> Angular sweep in degrees.
         - label        -> Text displayed inside the slice (truncated if too long).
@@ -84,13 +85,18 @@ private:
         - Renders the label with foreground/background color contrast.
 
     Notes:
-        - Although this supports true ellipses (r1 != r2),
-        it is currently used with r1 == r2 (i.e., circles).
-        - Terminal character aspect ratios can visually distort circles.
-        r1 and r2 could be adjusted in the future to compensate for
-        vertical text scaling differences in FTXUI.
+        - Terminal cells aren't exactly twice as tall as wide (Warp: 9 x 20.4 px, ratio 2.26),
+          so r1 == r2 drew an ellipse. The caller sets r2 from the real cell size (see cellRatio()),
+          which gives a round pie on screen.
         - Angular step (currently ~0.4°) is a visual/performance trade-off
         and could be made configurable.
     */
+    /* Height / width of a character cell
+    - CHART_CELL_RATIO from the config when it is set (> 0).
+    - Otherwise asked to the terminal (pixel size of the window, which SSH forwards).
+    - 2.0 if the terminal doesn't tell.
+    */
+    static double cellRatio();
+
     static void drawAngledBlockEllipseRingOffset(Canvas& c, int x1, int y1, int r1, int r2, int r3, double starting_angle, double angle, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id);
 };

@@ -76,10 +76,16 @@ On a Mac keyboard `âŒ«` is Backspace (go up), not delete: use `D` (or `fn` + `âŒ
 
 - Icons are plain ASCII (`+` folder, `>` selection, `<` back), so the columns line up in every
   terminal and font. Nerd Font icons can still be set in `~/.config/bonsai-romeo/bonsai.conf`.
-- Colors: through SSH the program can't tell whether your terminal supports 24-bit colors (ROMEO
-  doesn't receive `COLORTERM`). It assumes it does, as Ghostty, Warp, iTerm2, kitty, WezTerm and
-  recent macOS Terminal do. If the colors look wrong, use 256 colors:
-  `COLOR_MODE = "256"` in the config, or `BONSAI_COLOR=256 bonsai-romeo`.
+- The pie is round on screen: the size of a character cell is read from the terminal (SSH
+  forwards it), since cells are rarely exactly twice as tall as wide (Warp: 9 x 20.4 px).
+  If your terminal doesn't report it, set `CHART_CELL_RATIO` (cell height / width) in the config.
+- Colors: through SSH the program can't ask your terminal whether it supports 24-bit colors
+  (ROMEO receives neither `COLORTERM` nor any other variable), and FTXUI then falls back to 256
+  colors, which flattens the shades of the pie. bonsai-romeo uses 24-bit colors for known terminals
+  (Warp, Ghostty, iTerm2, kitty, WezTerm...) and for SSH sessions in xterm-like terminals.
+  If the colors look wrong, use 256 colors: `COLOR_MODE = "256"` in the config, or
+  `BONSAI_COLOR=256 bonsai-romeo`.
+- If the SSH connection drops, the program quits on its own instead of staying on the login node.
 
 A full scan walks GPFS metadata and can take a couple of minutes; sizes fill in live.
 

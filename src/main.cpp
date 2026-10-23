@@ -14,12 +14,18 @@
 #include <filesystem>
 #include <ftxui/screen/terminal.hpp>
 #include <cstdlib>
+#include <algorithm>
+#include <cctype>
+#include <optional>
 #include <string>
 #include <vector>
 
 #include <iostream>
 #include <unistd.h>
 #include <thread>
+#include <atomic>
+#include <chrono>
+#include <poll.h>
 #include <pwd.h>
 
 /* TODO: bug? (can't reproduce anymore...)
@@ -35,43 +41,55 @@
 namespace fs = std::filesystem;
 
 /* Colors
-- FTXUI only uses 24 bit colors when COLORTERM says so, else it falls back to 256 colors.
-- SSH doesn't carry COLORTERM (ROMEO accepts no environment variable at all), so through SSH
-  the pie chart lost most of its shades, even in a terminal that has them.
-- "auto" therefore also picks truecolor for terminals known by their TERM, and for any SSH session
-  in an xterm-like terminal: nearly every terminal used to reach ROMEO handles 24 bit colors.
-- COLOR_MODE in the config, or BONSAI_COLOR, forces a mode.
+- FTXUI decides between 24 bit and 256 colors itself, when its loop starts. TERM=xterm-256color
+  makes it pick 256 colors, before it even looks at TERM_PROGRAM (WarpTerminal, ghostty...).
+- Through SSH it can't do better: COLORTERM never reaches ROMEO (no environment variable does).
+  So the pie lost most of its shades, even in terminals that have them.
+- "auto" picks 24 bit colors for terminals known by TERM or TERM_PROGRAM, and for any SSH session
+  in an xterm-like terminal: nearly every terminal used to reach ROMEO handles them.
+- COLOR_MODE in the config, or BONSAI_COLOR, forces a mode. No value: FTXUI's choice stays.
 */
-static void setupColors(std::string mode) {
-    using ftxui::Terminal::SetColorSupport;
+static std::optional<ftxui::Terminal::Color> chooseColors(std::string mode) {
+    using ftxui::Terminal::Color;
 
     if (const char* env = std::getenv("BONSAI_COLOR"); env && *env)
         mode = env;
 
-    if (mode == "truecolor" || mode == "24bit") return SetColorSupport(ftxui::Terminal::Color::TrueColor);
-    if (mode == "256") return SetColorSupport(ftxui::Terminal::Color::Palette256);
-    if (mode == "16") return SetColorSupport(ftxui::Terminal::Color::Palette16);
+    if (mode == "truecolor" || mode == "24bit") return Color::TrueColor;
+    if (mode == "256") return Color::Palette256;
+    if (mode == "16") return Color::Palette16;
 
     auto env = [](const char* name) {
         const char* value = std::getenv(name);
-        return std::string(value ? value : "");
+        std::string s = value ? value : "";
+        std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return std::tolower(c); });
+        return s;
     };
 
     const std::string colorterm = env("COLORTERM");
     const std::string term = env("TERM");
+    const std::string program = env("TERM_PROGRAM");
     const bool ssh = !env("SSH_CONNECTION").empty() || !env("SSH_TTY").empty();
 
     if (colorterm == "truecolor" || colorterm == "24bit")
-        return SetColorSupport(ftxui::Terminal::Color::TrueColor);
+        return Color::TrueColor;
 
     for (const char* known : {"ghostty", "kitty", "wezterm", "alacritty", "foot", "direct", "iterm"})
         if (term.find(known) != std::string::npos)
-            return SetColorSupport(ftxui::Terminal::Color::TrueColor);
+            return Color::TrueColor;
+
+    // Apple's Terminal.app before macOS 26 only has 256 colors
+    if (program.find("apple_terminal") != std::string::npos)
+        return Color::Palette256;
+
+    for (const char* known : {"warp", "ghostty", "iterm", "wezterm", "vscode", "tabby", "hyper"})
+        if (program.find(known) != std::string::npos)
+            return Color::TrueColor;
 
     if (ssh && term.find("xterm") != std::string::npos)
-        return SetColorSupport(ftxui::Terminal::Color::TrueColor);
+        return Color::TrueColor;
 
-    // Otherwise FTXUI's own detection stays
+    return std::nullopt;
 }
 
 int main(int argc, char* argv[]) {
@@ -160,7 +178,11 @@ int main(int argc, char* argv[]) {
     }
 
     auto config = Config::get();
-    setupColors(config.COLOR_MODE);
+
+    // Set now for what is drawn before the loop starts, and again once FTXUI has made its own choice (see below)
+    const auto colors = chooseColors(config.COLOR_MODE);
+    if (colors)
+        ftxui::Terminal::SetColorSupport(*colors);
 
     auto screen = ScreenInteractive::Fullscreen();
 
@@ -385,8 +407,48 @@ int main(int argc, char* argv[]) {
         return false;
     });
 
+    /* Colors, again
+    - FTXUI picks its own color mode when the loop starts (and again after a suspend), see chooseColors().
+    - Checked before each frame: when it differs, ours is put back and the pie is computed again,
+      since its colors were already rounded to the wrong mode.
+    */
+    auto root = Renderer(app, [&] {
+        if (colors && ftxui::Terminal::ColorSupport() != *colors) {
+            ftxui::Terminal::SetColorSupport(*colors);
+
+            {
+                std::lock_guard<std::mutex> lock(data->cv_mutex);
+                data->pie_path_changed = true;
+            }
+            data->cv.notify_all();
+        }
+
+        return app->Render();
+    });
+
+    /* Hangup watchdog
+    - When the SSH connection drops, FTXUI keeps its loop running on a terminal that is gone,
+      and the program stays on the login node forever.
+    - The terminal reports the hangup on stdin: the loop is then asked to stop, like with Q.
+    */
+    std::atomic<bool> running{true};
+    std::thread hangup_thread([&screen, &running] {
+        while (running) {
+            pollfd input{STDIN_FILENO, 0, 0};
+
+            if (poll(&input, 1, 0) > 0 && (input.revents & (POLLHUP | POLLERR | POLLNVAL))) {
+                screen.Exit();
+                return;
+            }
+
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+        }
+    });
+
     // Render UI
-    screen.Loop(app);
+    screen.Loop(root);
+    running = false;
+    hangup_thread.join();
 
 
     // Stop app

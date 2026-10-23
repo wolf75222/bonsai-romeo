@@ -10,6 +10,8 @@
 #include <cmath>
 #include <map>
 #include <set>
+#include <sys/ioctl.h>
+#include <unistd.h>
 
 void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int r1, int r2, int r_inner, double start_deg, double sweep_deg, const std::string& label, const Color& color, const Color& text_color, std::vector<int>& drawn_by, int slice_id) {
     if (sweep_deg <= 0.0)
@@ -39,13 +41,16 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
     const double cos_d = std::cos(step);
     const double sin_d = std::sin(step);
 
+    // One radial sample per dot of the longer axis, so no block is skipped
     const int outer_r = std::max(r1, r2);
+    const double inner_t = r1 > 0 ? static_cast<double>(r_inner) / r1 : 0.0;
+    const int first_r = static_cast<int>(inner_t * outer_r);
 
-    // Precompute mid-angle and mid-radius for text
+    // Label in the middle of the slice. A character is 2 dots wide on the canvas
     const double mid_angle = start + (end - start) / 2.0;
-    const double mid_radius = r_inner + (outer_r - r_inner) / 2.0;
-    const int text_x = (static_cast<int>(cx + std::cos(mid_angle) * mid_radius) - static_cast<int>(FormatUtils::length(display_label)) / 2);
-    const int text_y = static_cast<int>(cy + std::sin(mid_angle) * mid_radius);
+    const double mid_t = (inner_t + 1.0) / 2.0;
+    const int text_x = static_cast<int>(cx + std::cos(mid_angle) * r1 * mid_t) - static_cast<int>(FormatUtils::length(display_label));
+    const int text_y = static_cast<int>(cy + std::sin(mid_angle) * r2 * mid_t);
 
     const int width = c.width();
     const int height = c.height();
@@ -59,12 +64,9 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
         const double dx_outer = cos_a * r1;
         const double dy_outer = sin_a * r2;
 
-        const double dx_inner = cos_a * r_inner;
-        const double dy_inner = sin_a * r_inner;
-
         const double inv_len = 1.0 / outer_r;
 
-        for (int r = r_inner; r <= outer_r; ++r) {
+        for (int r = first_r; r <= outer_r; ++r) {
             double t = r * inv_len;
 
             int px = static_cast<int>(cx + dx_outer * t);
@@ -98,6 +100,34 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
         c.foreground_color = text_color;
         c.background_color = color;
     });
+}
+
+double BonsaiPie::cellRatio() {
+    const double configured = Config::get().CHART_CELL_RATIO;
+    if (configured > 0)
+        return configured;
+
+    winsize ws{};
+    if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == 0 && ws.ws_xpixel > 0 && ws.ws_ypixel > 0 && ws.ws_col > 0 && ws.ws_row > 0) {
+        const double ratio = (static_cast<double>(ws.ws_ypixel) / ws.ws_row) / (static_cast<double>(ws.ws_xpixel) / ws.ws_col);
+
+        // Anything else is a terminal reporting nonsense
+        if (ratio > 1.0 && ratio < 4.0)
+            return ratio;
+    }
+
+    return 2.0;
+}
+
+// Same as Color::Interpolate(t, color, Color::Black) (gamma 2.2), on exact RGB values
+static std::array<int, 3> darken(const std::array<int, 3>& rgb, double t) {
+    t = std::clamp(t, 0.0, 1.0);
+    std::array<int, 3> out;
+
+    for (int i = 0; i < 3; i++)
+        out[i] = static_cast<int>(std::pow(std::pow(rgb[i], 2.2) * (1.0 - t), 1.0 / 2.2));
+
+    return out;
 }
 
 // An entry gets its own slice when it weighs at least `threshold` percent of the displayed directory
@@ -258,7 +288,17 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
         std::map<std::string, double> slice_offsets;
 
         std::map<std::pair<int, std::string>, int> color_indexes_per_parent;
-        std::map<std::string, std::pair<Color, Color>> slice_colors;
+
+        /* Slice colors are kept as RGB values
+        - A child is its parent's color, darkened. With 256 colors, darkening the already rounded
+          palette color and rounding again often fell back on the parent's color: rings looked flat.
+        - Darkening the exact RGB values and rounding once keeps the shades apart.
+        */
+        struct SliceColor {
+            std::array<int, 3> rgb;
+            Color text;
+        };
+        std::map<std::string, SliceColor> slice_colors;
 
         /* Minimum slices:
         - If no top-level entry reaches the size threshold (e.g. lots of equally sized entries),
@@ -336,9 +376,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                 continue;
             }
 
-            std::array<int, 3UL> color_values = cfg.CHART_COLORS[i % cfg.CHART_COLORS.size()];
-
-            Color color = Color::RGB(color_values[0], color_values[1], color_values[2]);
+            std::array<int, 3> rgb = cfg.CHART_COLORS[i % cfg.CHART_COLORS.size()];
             Color text_color = Color::Default;
 
             if(entry.depth != 0) {
@@ -347,10 +385,8 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                 auto key = std::make_pair(entry.depth, parent);
                 color_indexes_per_parent[key] += 1;
 
-                color = slice_colors[parent].first;
-                color = Color::Interpolate(cfg.CHART_DIM_FACTOR * color_indexes_per_parent[key], color, Color::Black);
-
-                text_color = slice_colors[parent].second;
+                rgb = darken(slice_colors[parent].rgb, cfg.CHART_DIM_FACTOR * color_indexes_per_parent[key]);
+                text_color = slice_colors[parent].text;
             }
 
             /* In these two code blocks, false is the logic to check wether the slice is selected
@@ -360,12 +396,14 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
                 // Same element of the list: no need to ask the filesystem if the two paths are the same file
                 bool is_selected = &entry == &entries[selected];
 
-                color = is_selected ? Color::White : color;
-                text_color = is_selected ? Color::Black : text_color;
+                if (is_selected) {
+                    rgb = {255, 255, 255};
+                    text_color = Color::Black;
+                }
             }
 
-            slice_colors[entry.path.string()].first = color;
-            slice_colors[entry.path.string()].second = text_color;
+            slice_colors[entry.path.string()] = SliceColor{rgb, text_color};
+            Color color = Color::RGB(rgb[0], rgb[1], rgb[2]);
 
             AppData::BonsaiPieEntry slice;
             slice.depth = entry.depth;
@@ -446,8 +484,15 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
             int w = c.width();
             int h = c.height();
 
-            // Account for margin (15) and center hole (15%)
-            int max_radius = std::min(w, h) / 2 - 15;
+            /* Round pie on screen
+            - The canvas has 2 dots per cell across and 4 down, so a dot is ratio / 2 times taller than wide
+            - A circle `r` dots across is therefore `r * 2 / ratio` dots down
+            - Radii below are along X; Y radii are scaled by y_scale
+            */
+            const double y_scale = 2.0 / cellRatio();
+
+            // Account for margin (15 dots) and center hole (15%)
+            int max_radius = std::min(w / 2 - 15, static_cast<int>((h / 2 - 15) / y_scale));
             int inner_hole_radius = max_radius * 0.15;
 
             Config cfg = Config::get();
@@ -479,7 +524,7 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
                     w / 2,
                     h / 2,
                     outer_radius,
-                    outer_radius,
+                    static_cast<int>(outer_radius * y_scale + 0.5),
                     inner_radius,
                     entry.offset_angle,
                     entry.sweep,
@@ -496,12 +541,13 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
             if (scanner->getMetric() == Scanner::Metric::INODES)
                 label += " files";
 
-            // For some reason -4 centers text better
-            c.DrawText((w / 2 - static_cast<int>(FormatUtils::length(label)) / 2) - 4, h / 2, label);
+            // A character is 2 dots wide: half the label is `length` dots
+            c.DrawText(w / 2 - static_cast<int>(FormatUtils::length(label)), h / 2, label);
 
             // Scanner status
             if(!scanner->isDone()) {
-                c.DrawText(w  - 21, 0, "Scanning...", [](Cell& c) { c.foreground_color = Color::White; });
+                const std::string status = "Scanning...";
+                c.DrawText(w - 2 * static_cast<int>(status.size()) - 2, 0, status, [](Cell& c) { c.foreground_color = Color::White; });
             }
 
         }) | flex;
