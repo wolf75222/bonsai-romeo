@@ -6,10 +6,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
+# FTXUI's release archive: one small download (363 KB), checked by its hash.
+# A git clone of its whole history could hang for minutes on the login nodes.
+if(POLICY CMP0135)
+  cmake_policy(SET CMP0135 NEW)
+endif()
+
 FetchContent_Declare(
   ftxui
-  GIT_REPOSITORY https://github.com/ArthurSonzogni/ftxui.git
-  GIT_TAG v7.0.3
+  URL https://github.com/ArthurSonzogni/FTXUI/archive/refs/tags/v7.0.3.tar.gz
+  URL_HASH SHA256=e7c62ffe19009759821b4f0f8df7f2a6fb83784c3a9f1477d81f56d3ee723c88
+  TIMEOUT 120
 )
 FetchContent_MakeAvailable(ftxui)
 

@@ -29,6 +29,7 @@
 #include <atomic>
 #include <chrono>
 #include <poll.h>
+#include <sys/stat.h>
 #include <pwd.h>
 
 /* TODO: bug? (can't reproduce anymore...)
@@ -138,7 +139,15 @@ int main(int argc, char* argv[]) {
     // The user's spaces (home, scratch, projects), see UserScope
     UserScope scope = UserScope::detect();
 
-    auto default_path = args.empty() ? scope.commonAncestor() : fs::weakly_canonical(args.front());
+    fs::path default_path = args.empty() ? scope.commonAncestor() : fs::weakly_canonical(args.front());
+
+    // One spelling for it (no trailing slash): paths are compared as they are written
+    {
+        std::string normal = default_path.lexically_normal().string();
+        while (normal.size() > 1 && normal.back() == '/')
+            normal.pop_back();
+        default_path = normal;
+    }
 
     if(!fs::exists(default_path)) {
         std::cerr << "Error: Path does not exist: " << default_path << std::endl;
@@ -155,9 +164,22 @@ int main(int argc, char* argv[]) {
         scope.roots = {default_path.string()};
     }
 
+    // Above some spaces only (bonsai-romeo /project): the others aren't listed (nor scanned)
+    if (scope.relation(default_path.native()) == UserScope::Relation::ANCESTOR) {
+        std::vector<std::string> below;
+        for (const auto& root : scope.roots) {
+            if (UserScope::isUnder(root, default_path.native()))
+                below.push_back(root);
+        }
+        if (!below.empty())
+            scope.roots = below;
+    }
+
     // Launch scanner
     auto home = fs::path(getpwuid(getuid())->pw_dir);
-    auto db_path = fs::weakly_canonical(home / ".cache/bonsai-romeo/db.txt");
+    // BONSAI_CACHE: another cache file (tests, or several setups)
+    const char* cache_env = std::getenv("BONSAI_CACHE");
+    auto db_path = fs::weakly_canonical(cache_env && *cache_env ? fs::path(cache_env) : home / ".cache/bonsai-romeo/db.txt");
 
     if (cleanup_only) {
         Scanner scanner = Scanner(default_path, db_path, scope);
@@ -270,6 +292,7 @@ int main(int argc, char* argv[]) {
                 screen.Post([&, removed] {
                     deleting = false;
                     result = removed;
+                    data->listing_version++;
                     if (result.failed) {
                         show_error_modal = true;
                     } else {
@@ -338,9 +361,10 @@ int main(int argc, char* argv[]) {
             bool is_dir = false;
             {
                 std::lock_guard<std::mutex> lock(data->menu_mutex);
-                if (*data->selected >= 0 && *data->selected < static_cast<int>(data->menu_entries->size())) {
-                    path = (*data->menu_entries)[*data->selected].path;
-                    is_dir = (*data->menu_entries)[*data->selected].is_dir;
+                // The Menu's own index: the shared copy may lag one list behind
+                if (selected >= 0 && selected < static_cast<int>(data->menu_entries->size())) {
+                    path = (*data->menu_entries)[selected].path;
+                    is_dir = (*data->menu_entries)[selected].is_dir;
                 }
             }
 
@@ -362,12 +386,15 @@ int main(int argc, char* argv[]) {
                 const std::string about = totals.final ? "" : "~";
                 amount = about + FormatUtils::toReadable(totals.disk, " ") + " on disk, " + about + FormatUtils::toCount(totals.inodes, " ") + " files";
             } else {
-                std::error_code ec;
-                amount = FormatUtils::toReadable(fs::file_size(path, ec), " ");
+                // fs::file_size() gives uintmax_t(-1) on error, shown as 17179869184 GiB
+                struct stat st;
+                amount = lstat(path.c_str(), &st) == 0 ? FormatUtils::toReadable(static_cast<uint64_t>(st.st_blocks) * 512, " ") + " on disk" : "size unknown";
             }
 
+            // The path cut in its middle to the screen (its end, the name, stays), the size on its own line
+            const size_t room = static_cast<size_t>(std::max(20, std::min(ftxui::Terminal::Size().dimx, 100) - 8));
             confirm_path = path;
-            confirm_target = scope.display(path) + "   (" + amount + ")";
+            confirm_target = FormatUtils::trimMiddle(scope.display(path), room) + "\n(" + amount + ")";
             confirm_focus = 0;
             show_confirm_modal = true;
             return true;
@@ -378,19 +405,25 @@ int main(int argc, char* argv[]) {
             {
                 std::lock_guard<std::mutex> lock(data->menu_mutex);
 
-                if(fs::equivalent(*data->path, default_path)) {
+                if(fs::path(*data->path) == default_path) {
                     return true;
                 }
 
                 std::filesystem::path p(*data->path);
                 new_path = p.parent_path().string();
+                std::string select = p.filename().string();
 
                 // From a space, straight back to the list of spaces (not GPFS's folders above it)
-                if (scope.relation(new_path) != UserScope::Relation::INSIDE)
+                if (scope.relation(new_path) != UserScope::Relation::INSIDE) {
                     new_path = default_path.string();
+                    select = scope.label(p.string());
+                }
 
+                // The folder just left is selected in its parent
                 *data->path = new_path;
-                data->select_label.clear();
+                data->select_path = new_path;
+                data->select_label = select;
+                data->select_generation = ++data->list_generation;
             }
 
             {
@@ -408,7 +441,7 @@ int main(int argc, char* argv[]) {
     });
 
     auto menu_container = Container::Vertical({menu_component});
-    std::thread menu_thread(BonsaiMenu::worker, &screen, data, &scanner, default_path);
+    std::thread menu_thread(BonsaiMenu::worker, &screen, data, &scanner, default_path, &selected);
 
 
     /* Init pie:
@@ -485,7 +518,9 @@ int main(int argc, char* argv[]) {
         {
             std::lock_guard<std::mutex> lock(data->menu_mutex);
             *data->path = folder.string();
+            data->select_path = folder.string();
             data->select_label = label;
+            data->select_generation = ++data->list_generation;
         }
 
         {
@@ -500,6 +535,8 @@ int main(int argc, char* argv[]) {
 
     // Cleanup suggestions (key C)
     auto cleanup_state = std::make_shared<BonsaiCleanup::State>();
+    std::thread cleanup_thread;
+    std::atomic<bool> cleanup_running{false};
     auto cleanup_component = BonsaiCleanup::window(cleanup_state, &scanner.getScope(),
         [&](const Scanner::CleanupItem& item) {
             open_in_explorer(item.path);
@@ -549,9 +586,31 @@ int main(int argc, char* argv[]) {
             return true;
         }
 
+        // Suggestions walk the whole tree (~700k folders): on their own thread, the window opens at once
         if ((event == Event::Character('c') || event == Event::Character('C')) && !modal_open()) {
-            BonsaiCleanup::fill(*cleanup_state, scanner);
             show_cleanup = true;
+
+            // Still looking (C, ESC, C): its list shows when it is ready, instead of the UI waiting for it here
+            if (cleanup_running)
+                return true;
+            if (cleanup_thread.joinable())
+                cleanup_thread.join();
+
+            cleanup_state->computing = true;
+            cleanup_state->all.clear();
+            BonsaiCleanup::apply(*cleanup_state);
+
+            cleanup_running = true;
+            cleanup_thread = std::thread([&] {
+                auto items = std::make_shared<std::vector<Scanner::CleanupItem>>(scanner.cleanup());
+                const bool partial = !scanner.isDone();
+
+                screen.Post([&, items, partial] {
+                    BonsaiCleanup::set(*cleanup_state, std::move(*items), partial);
+                });
+                screen.PostEvent(Event::Custom);
+                cleanup_running = false;
+            });
             return true;
         }
 
@@ -561,11 +620,14 @@ int main(int argc, char* argv[]) {
             scanner.setMetric(metric == Scanner::Metric::BYTES ? Scanner::Metric::DISK
                             : metric == Scanner::Metric::DISK ? Scanner::Metric::INODES : Scanner::Metric::BYTES);
 
-            // The list is sorted again: the same entry stays selected
+            // The list is sorted again: the same entry stays selected (looked up in the new list)
             {
                 std::lock_guard<std::mutex> lock(data->menu_mutex);
-                if (*data->selected >= 0 && *data->selected < static_cast<int>(data->menu_entries->size()))
-                    data->select_label = (*data->menu_entries)[*data->selected].label;
+                if (selected >= 0 && selected < static_cast<int>(data->menu_entries->size())) {
+                    data->select_path = *data->path;
+                    data->select_label = (*data->menu_entries)[selected].label;
+                    data->select_generation = ++data->list_generation;
+                }
             }
 
             {
@@ -579,7 +641,7 @@ int main(int argc, char* argv[]) {
         }
 
         if(event == Event::ArrowRight && !modal_open()) {
-            config.SIDEBAR_WIDTH += 1;
+            config.SIDEBAR_WIDTH = std::min(config.SIDEBAR_WIDTH + 1, std::max(20, ftxui::Terminal::Size().dimx - 20));
             return true;
         }
 
@@ -596,29 +658,18 @@ int main(int argc, char* argv[]) {
     - Checked before each frame: when it differs, ours is put back and the pie is computed again,
       since its colors were already rounded to the wrong mode.
     */
+    // The width the user picked (keys, mouse), and the one last drawn: a narrow terminal only narrows it on screen
+    int sidebar_width = config.SIDEBAR_WIDTH;
+    int shown_width = config.SIDEBAR_WIDTH;
+
     auto root = Renderer(app, [&] {
-        // An entry the cleanup view asked for: selected as soon as the menu lists it
-        {
-            std::lock_guard<std::mutex> lock(data->menu_mutex);
-
-            if (!data->select_label.empty()) {
-                for (size_t i = 0; i < data->menu_entries->size(); i++) {
-                    if ((*data->menu_entries)[i].label != data->select_label)
-                        continue;
-
-                    selected = static_cast<int>(i);
-                    *data->selected = selected;
-                    data->select_label.clear();
-
-                    {
-                        std::lock_guard<std::mutex> cv_lock(data->cv_mutex);
-                        data->pie_sel_changed = true;
-                    }
-                    data->cv.notify_all();
-                    break;
-                }
-            }
-        }
+        /* Sidebar width
+        - Arrow keys and mouse drags could push it past the screen: the chart vanished, and the width was saved so
+        - Kept between 20 columns and the terminal width minus 20 (for the chart)
+        */
+        if (config.SIDEBAR_WIDTH != shown_width)
+            sidebar_width = config.SIDEBAR_WIDTH;
+        config.SIDEBAR_WIDTH = shown_width = std::clamp(sidebar_width, 20, std::max(20, ftxui::Terminal::Size().dimx - 20));
 
         if (colors && ftxui::Terminal::ColorSupport() != *colors) {
             ftxui::Terminal::SetColorSupport(*colors);
@@ -657,6 +708,9 @@ int main(int argc, char* argv[]) {
     running = false;
     hangup_thread.join();
 
+    if (cleanup_thread.joinable())
+        cleanup_thread.join();
+
     if (delete_thread.joinable()) {
         if (deleting)
             std::cerr << "Waiting for the deletion of " << deleting_label << " to finish..." << std::endl;
@@ -668,7 +722,10 @@ int main(int argc, char* argv[]) {
     scanner.stop();
     AppData::stop(data);
 
-    // Save config
+    // Save config: the width picked, not the one a small terminal forced
+    if (config.SIDEBAR_WIDTH != shown_width)
+        sidebar_width = config.SIDEBAR_WIDTH;
+    config.SIDEBAR_WIDTH = sidebar_width;
     config.writeToFile();
 
     scanner_thread.join();

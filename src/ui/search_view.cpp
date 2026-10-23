@@ -165,6 +165,11 @@ Component BonsaiSearch::window(std::shared_ptr<State> state, Worker* worker, Sca
 
     return CatchEvent(view, [state, on_open, on_close](Event event) {
         if (event == Event::Escape) {
+            // An ENTER still waiting would open a folder the next time the search is shown
+            {
+                std::lock_guard<std::mutex> lock(state->mutex);
+                state->open_when_ready = false;
+            }
             on_close();
             return true;
         }
@@ -174,7 +179,21 @@ Component BonsaiSearch::window(std::shared_ptr<State> state, Worker* worker, Sca
             std::lock_guard<std::mutex> lock(state->mutex);
             const int count = static_cast<int>(state->hits.size());
 
-            if (event == Event::Return) {
+            /* ENTER while the search still runs: remembered, the first hit opens once it is there
+            - It used to do nothing, and the window stayed open: the next keys (Q too) went into the query
+            */
+            if (event == Event::Custom) {
+                if (!state->open_when_ready || state->searching)
+                    return false;
+                state->open_when_ready = false;
+                if (count == 0)
+                    return false;
+                path = state->hits[0].path;
+            } else if (event == Event::Return) {
+                if (state->searching) {
+                    state->open_when_ready = true;
+                    return true;
+                }
                 if (state->selected >= 0 && state->selected < count)
                     path = state->hits[state->selected].path;
                 else
@@ -183,7 +202,12 @@ Component BonsaiSearch::window(std::shared_ptr<State> state, Worker* worker, Sca
             else if (count > 0 && event == Event::ArrowUp) { state->selected = std::max(state->selected - 1, 0); return true; }
             else if (count > 0 && event == Event::PageDown) { state->selected = std::min(state->selected + 10, count - 1); return true; }
             else if (count > 0 && event == Event::PageUp) { state->selected = std::max(state->selected - 10, 0); return true; }
-            else return false;  // Everything else is typing
+            else {
+                // Everything else is typing: a new query, so an ENTER waiting for the previous one no longer counts
+                if (event.is_character() || event == Event::Backspace || event == Event::Delete)
+                    state->open_when_ready = false;
+                return false;
+            }
         }
 
         // Outside of the lock: opening wakes the explorer threads

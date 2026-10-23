@@ -29,6 +29,7 @@ Note that directory sizes aren't computed (scanner's job)
 
 #include "../../include/core/app_data.hpp"
 #include "../../include/core/scanner.hpp"
+#include "../../include/ui/listing.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
@@ -54,7 +55,7 @@ private:
     - Deeper entries are only listed if they reach `threshold` percent of `root_size`,
       and only those directories are opened.
     */
-    static void collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, uint64_t root_size, double threshold, Scanner* scanner);
+    static void collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, uint64_t root_size, double threshold, Scanner* scanner, Listing& listing, uint64_t version);
 
     /* Draws a ring-shaped sector of an ellipse onto the Canvas.
     Parameters:

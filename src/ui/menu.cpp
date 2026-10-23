@@ -1,4 +1,5 @@
 #include "../../include/ui/menu.hpp"
+#include "../../include/ui/listing.hpp"
 
 #include "../../include/config/config.hpp"
 #include "../../include/utils/format.hpp"
@@ -12,7 +13,11 @@
 #include <sstream>
 #include <thread>
 
-void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, const fs::path& default_path) {
+void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, const fs::path& default_path, int* selected) {
+    // What the folder shown holds, read once and kept (see Listing): only folder sizes change between passes
+    Listing listing(scanner->getScope().uid);
+    fs::path listed_path;
+
     while (true) {
         std::vector<AppData::BonsaiMenuEntry> new_entries;
         std::vector<std::string> new_labels;
@@ -23,8 +28,49 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
             current_path = *data->path;
         }
 
+        // Read before the sizes: if the scan ends during this pass, one more pass shows the final sizes
+        const bool was_done = scanner->isDone();
+
+        // Requests made after this point are for the next pass's list
+        const uint64_t generation = data->list_generation.load();
+
+        /* The folder shown was removed meanwhile (by another program, a job...)
+        - Back to the closest folder above it that still exists (fs::equivalent() on it used to throw and crash)
+        */
+        std::error_code exists_ec;
+        if (current_path != default_path && !fs::is_directory(current_path, exists_ec)) {
+            fs::path up = current_path;
+            while (up != default_path && up.has_parent_path() && up != up.parent_path() && !fs::is_directory(up, exists_ec))
+                up = up.parent_path();
+
+            if (!UserScope::isUnder(up.native(), default_path.native()) || scanner->getScope().relation(up.native()) != UserScope::Relation::INSIDE)
+                up = default_path;
+
+            // On the UI thread, and only if the user is still there
+            screen->Post([data, gone = current_path, up] {
+                {
+                    std::lock_guard<std::mutex> lock(data->menu_mutex);
+                    if (fs::path(*data->path) != gone)
+                        return;
+                    *data->path = up.string();
+                }
+                {
+                    std::lock_guard<std::mutex> lock(data->cv_mutex);
+                    data->pie_path_changed = true;
+                }
+                data->cv.notify_all();
+            });
+            current_path = up;
+        }
+
+        // A folder just opened is read again: what other programs changed in it since shows
+        if (current_path != listed_path) {
+            listing.expire(current_path, Listing::RECENT);
+            listed_path = current_path;
+        }
+
         // Always allow going back until default_path is reached
-        if (!fs::equivalent(current_path, default_path)) {
+        if (current_path != default_path) {
             new_labels.push_back("..");
             new_entries.push_back(AppData::BonsaiMenuEntry{0, 0, "..", "", true});
         }
@@ -45,30 +91,32 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
                     item.is_dir = true;
                     item.size = scanner->value(totals);
                     item.final = totals.final;
+                    item.known = totals.known;
                     item.snapped_size = scanner->getSnapped(root);
                     unsorted_entries.push_back(std::move(item));
                 }
             }
 
-            // Parse current path and get relevant data (size, is_dir, path, etc.)
-            else for (const auto& entry : fs::directory_iterator(current_path)) {
+            // What the folder holds, from the listing; folder sizes from the scan
+            else for (const auto& entry : *listing.get(current_path, data->listing_version.load())) {
                 // Other users' files and folders aren't shown
-                if (!scanner->visible(entry))
+                if (!scanner->visibleEntry(entry.path, entry.is_dir, entry.owned))
                     continue;
 
                 AppData::BonsaiMenuEntry item;
-                item.path = entry.path().string();
-                item.label = entry.path().filename().string();
-                item.is_dir = entry.is_directory();
+                item.path = entry.path;
+                item.label = entry.name;
+                item.is_dir = entry.is_dir;
 
                 if (!item.is_dir) {
-                    item.size = scanner->fileValue(entry);
+                    item.size = scanner->fileValue(entry.bytes, entry.disk);
                     item.snapped_size = 0;
                 } else {
-                    const Scanner::Totals totals = scanner->totals(entry.path());
+                    const Scanner::Totals totals = scanner->totals(entry.path);
                     item.size = scanner->value(totals);
                     item.final = totals.final;
-                    item.snapped_size = scanner->getSnapped(entry.path());
+                    item.known = totals.known;
+                    item.snapped_size = scanner->getSnapped(entry.path);
                 }
 
                 unsorted_entries.push_back(std::move(item));
@@ -97,18 +145,67 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
 
         } catch (const fs::filesystem_error&) {}
 
-        {
-            // Update the menu data
-            std::lock_guard<std::mutex> lock(data->menu_mutex);
-            data->menu_entries->swap(new_entries);
-            data->menu_labels->swap(new_labels);
-        }
+        /* Published on the UI thread
+        - FTXUI's Menu reads the labels while handling events (every mouse move too), outside of any lock:
+          swapping them from this thread raced with it
+        - The entry asked for (after F, going up, opening from search / cleanup) is looked up in this new
+          list: looked up in the one on screen, it landed on the same row of the old list, another entry
+        - A list for a folder the user already left is dropped: the next pass makes the right one
+        */
+        auto entries = std::make_shared<std::vector<AppData::BonsaiMenuEntry>>(std::move(new_entries));
+        auto labels = std::make_shared<std::vector<std::string>>(std::move(new_labels));
+
+        screen->Post([data, entries, labels, listed = current_path, selected, generation] {
+            bool moved = false;
+            {
+                std::lock_guard<std::mutex> lock(data->menu_mutex);
+                if (fs::path(*data->path) != listed)
+                    return;
+
+                data->menu_entries->swap(*entries);
+                data->menu_labels->swap(*labels);
+
+                const int count = static_cast<int>(data->menu_entries->size());
+
+                if (!data->select_path.empty() && fs::path(data->select_path) == listed && generation >= data->select_generation) {
+                    int index = count > 1 && (*data->menu_entries)[0].label == ".." ? 1 : 0;
+                    for (int i = 0; i < count && !data->select_label.empty(); i++) {
+                        if ((*data->menu_entries)[i].label == data->select_label) {
+                            index = i;
+                            break;
+                        }
+                    }
+                    *selected = index;
+                    data->select_path.clear();
+                    data->select_label.clear();
+                    moved = true;
+                }
+
+                // The list got shorter (a deletion): stay on a row that exists
+                if (*selected >= count) {
+                    *selected = std::max(0, count - 1);
+                    moved = true;
+                }
+                if (*data->selected != *selected) {
+                    *data->selected = *selected;
+                    moved = true;
+                }
+            }
+
+            if (moved) {
+                {
+                    std::lock_guard<std::mutex> lock(data->cv_mutex);
+                    data->pie_sel_changed = true;
+                }
+                data->cv.notify_all();
+            }
+        });
 
         // Update render and sleep if scan is finished or new path
         screen->PostEvent(Event::Custom);
 
         // Sleep until woken up or keep going until scanner has completed
-        if(!scanner->isDone()) {
+        if(!was_done) {
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
             continue;
         }
@@ -224,8 +321,8 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             hbox(
                 filler(),
-                // "~": not final yet, from the previous scan or still being scanned
-                text(item.label == ".." ? "" : (item.final ? "" : "~") + scanner->formatShort(item.size)) | color(Color::GrayDark)
+                // "~": not final yet, from the previous scan or still being scanned. "?": not in the scan
+                text(item.label == ".." ? "" : !item.known ? "?" : (item.final ? "" : "~") + scanner->formatShort(item.size)) | color(Color::GrayDark)
             ) | size(WIDTH, EQUAL, size_width)
         });
 
@@ -244,18 +341,26 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             new_path = (*data->menu_entries)[*selected].path;
 
-            // For ".." go up; from a space, straight back to the list of spaces
+            // Down: the new folder starts at its first entry
+            std::string select = "";
+
+            // For ".." go up; from a space, straight back to the list of spaces; the folder left is selected
             if ((*data->menu_entries)[*selected].label == "..") {
                 std::filesystem::path p(*data->path);
                 new_path = p.parent_path().string();
+                select = p.filename().string();
 
-                if (scanner->getScope().relation(new_path) != UserScope::Relation::INSIDE)
+                if (scanner->getScope().relation(new_path) != UserScope::Relation::INSIDE) {
                     new_path = default_path.string();
+                    select = scanner->getScope().label(p.string());
+                }
             }
 
             *data->selected = *selected;
             *data->path = new_path;
-            data->select_label.clear();
+            data->select_path = new_path;
+            data->select_label = select;
+            data->select_generation = ++data->list_generation;
         }
 
         {

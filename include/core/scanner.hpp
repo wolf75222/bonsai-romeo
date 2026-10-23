@@ -109,6 +109,12 @@ public:
     */
     bool visible(const fs::directory_entry& entry);
 
+    // Same, from what a listing already knows (see Listing): no call to the file system
+    bool visibleEntry(const std::string& path, bool is_dir, bool owned);
+
+    // Value of a listed file for the current metric
+    uint64_t fileValue(uint64_t bytes, uint64_t disk) const;
+
     /* cleanup()
     - What could be cleaned in the user's spaces, biggest first:
         - caches and rebuildable folders (pip / conda / spack / apptainer caches, __pycache__, build folders...)

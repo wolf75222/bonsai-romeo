@@ -77,13 +77,13 @@ void BonsaiPie::drawAngledBlockEllipseRingOffset(Canvas& c, int cx, int cy, int 
     const bool tall_enough = inside(center_x, center_y - 1.5) && inside(center_x, center_y + 1.5);
 
     // The whole name, or at least 3 of its letters: "h.." says nothing
-    const size_t length = FormatUtils::length(label);
+    const size_t length = FormatUtils::width(label);
     std::string display_label;
     if (tall_enough && room >= 3 && (length <= static_cast<size_t>(room) || room >= 5)) {
         display_label = FormatUtils::trimSuffix(label, static_cast<size_t>(std::min(room, 16)), "..");
     }
 
-    const int text_x = static_cast<int>(center_x) - static_cast<int>(FormatUtils::length(display_label));
+    const int text_x = static_cast<int>(center_x) - static_cast<int>(FormatUtils::width(display_label));
     const int text_y = static_cast<int>(center_y);
 
     const int width = c.width();
@@ -175,7 +175,7 @@ static bool reachesThreshold(uint64_t size, uint64_t root_size, double threshold
     return root_size > 0 && size <= root_size && size * 100.0 / root_size >= threshold;
 }
 
-void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, uint64_t root_size, double threshold, Scanner* scanner) {
+void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entries, int current_depth, int max_depth, uint64_t root_size, double threshold, Scanner* scanner, Listing& listing, uint64_t version) {
     if (current_depth > max_depth) return;
 
     // Above the spaces: the spaces themselves, like the menu (see Scanner::isSpacesView)
@@ -185,35 +185,24 @@ void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entr
             entries.push_back(EntryInfo{root, size, true, current_depth});
 
             if (reachesThreshold(size, root_size, threshold))
-                collectEntries(root, entries, current_depth + 1, max_depth, root_size, threshold, scanner);
+                collectEntries(root, entries, current_depth + 1, max_depth, root_size, threshold, scanner, listing, version);
         }
         return;
     }
 
-    std::error_code dir_ec;
-    fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, dir_ec);
-
-    for (; !dir_ec && it != fs::directory_iterator(); it.increment(dir_ec)) {
-        const fs::directory_entry& entry = *it;
-        std::error_code ec;
-
-        // The entry type comes with the directory listing: no extra system call per entry
-        if (entry.is_symlink(ec))
-            continue;
-
+    // What the folder holds, from the listing (read once, see Listing); folder sizes from the scan
+    const Listing::Entries listed = listing.get(dir, version);
+    for (const auto& entry : *listed) {
         // Same filter as the menu, so the selection matches the slices
-        if (!scanner->visible(entry))
+        if (!scanner->visibleEntry(entry.path, entry.is_dir, entry.owned))
             continue;
 
-        const bool is_dir = entry.is_directory(ec);
         uint64_t size = 0;
 
-        if (is_dir) {
-            size = scanner->get(entry.path());
-
-        } else if (entry.is_regular_file(ec)) {
-            size = scanner->fileValue(entry);
-
+        if (entry.is_dir) {
+            size = scanner->get(entry.path);
+        } else if (entry.regular) {
+            size = scanner->fileValue(entry.bytes, entry.disk);
         } else {
             continue;
         }
@@ -230,15 +219,18 @@ void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entr
         if (current_depth > 0 && !has_slice)
             continue;
 
-        entries.push_back(EntryInfo{entry.path(), size, is_dir, current_depth});
+        entries.push_back(EntryInfo{entry.path, size, entry.is_dir, current_depth});
 
-        if (is_dir && has_slice)
-            collectEntries(entry.path(), entries, current_depth + 1, max_depth, root_size, threshold, scanner);
+        if (entry.is_dir && has_slice)
+            collectEntries(entry.path, entries, current_depth + 1, max_depth, root_size, threshold, scanner, listing, version);
     }
 }
 
 void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, const fs::path& default_path) {
     std::vector<EntryInfo> entries;
+
+    // What the folders drawn hold, read once and kept (see Listing)
+    Listing listing(scanner->getScope().uid);
 
     // True when `entries` was listed during the scan, with sizes that were still growing
     bool entries_from_scan = false;
@@ -254,19 +246,20 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
         bool sel_changed = false;
         int selected = 0;
 
+        // The wake-up flags are written under cv_mutex (and waited on with it, below)
+        {
+            std::lock_guard<std::mutex> lock(data->cv_mutex);
+            sel_changed = data->pie_sel_changed;
+            data->pie_sel_changed = false;
+        }
+
         {
             std::lock_guard<std::mutex> lock(data->menu_mutex);
-            sel_changed = data->pie_sel_changed;
             current_path = *data->path;
 
             // If the top label is ".." it means we have to offset selected index by -1
             if (*data->selected >= 0 && *data->selected < (int)data->menu_entries->size()) {
-                selected = !fs::equivalent(default_path, current_path) ? *data->selected - 1 : *data->selected;
-            }
-
-            // Don't forget to reset wake up condition
-            if(data->pie_sel_changed) {
-                data->pie_sel_changed = false;
+                selected = current_path != default_path ? *data->selected - 1 : *data->selected;
             }
         }
 
@@ -285,12 +278,16 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
           The pie then showed the entries of the previous directory until the next key press
         */
         if(!sel_changed || entries_from_scan || current_path != entries_path){
+            // A folder just opened is read again, as in the explorer
+            if (current_path != entries_path)
+                listing.expire(current_path, Listing::RECENT);
+
             entries_from_scan = !scan_done;
             entries_path = current_path;
             entries.clear();
 
             // Parse current path with a max depth of 3
-            collectEntries(current_path, entries, 0, cfg.CHART_MAX_GENERATIONS - 1, root_size, cfg.CHART_MAX_SIZE_THRESHOLD_PERCENTAGE, scanner);
+            collectEntries(current_path, entries, 0, cfg.CHART_MAX_GENERATIONS - 1, root_size, cfg.CHART_MAX_SIZE_THRESHOLD_PERCENTAGE, scanner, listing, data->listing_version.load());
 
             /* Sort:
             - Depth first: lower depth is higer priority
@@ -540,7 +537,9 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
 
 
         {
-            std::unique_lock<std::mutex> lock(data->pie_mutex);
+            /* Same mutex as the writers of the flags: with another one (it used pie_mutex), a wake-up
+               could be missed, the stop signal too, and quitting then hung on joining this thread */
+            std::unique_lock<std::mutex> lock(data->cv_mutex);
 
             data->cv.wait(lock, [&] {
                 return data->pie_path_changed || data->pie_sel_changed || data->stop;
@@ -585,7 +584,7 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
             // Account for margin (15 dots) and center hole (15%)
             int max_radius = std::min(w / 2 - 15, static_cast<int>((h / 2 - 15) / y_scale));
             // The hole holds the total: a character is 2 dots wide, so half the label is `length` dots
-            int inner_hole_radius = std::min(std::max(static_cast<int>(max_radius * 0.15), static_cast<int>(FormatUtils::length(label)) + 2), max_radius / 2);
+            int inner_hole_radius = std::min(std::max(static_cast<int>(max_radius * 0.15), static_cast<int>(FormatUtils::width(label)) + 2), max_radius / 2);
 
             Config cfg = Config::get();
             int max_layers = cfg.CHART_MAX_GENERATIONS;
@@ -635,7 +634,7 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
             }
 
             // A character is 2 dots wide: half the label is `length` dots
-            c.DrawText(w / 2 - static_cast<int>(FormatUtils::length(label)), h / 2, label);
+            c.DrawText(w / 2 - static_cast<int>(FormatUtils::width(label)), h / 2, label);
 
             // Scanner status
             if(!scanner->isDone()) {

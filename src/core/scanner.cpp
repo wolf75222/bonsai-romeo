@@ -373,6 +373,30 @@ uint64_t Scanner::fileValue(const fs::directory_entry& entry) {
     }
 }
 
+bool Scanner::visibleEntry(const std::string& entry, bool is_dir, bool owned) {
+    if (is_dir) {
+        const Totals t = totals(entry);
+        if (t.known)
+            return t.bytes > 0 || t.inodes > 0 || owned;
+
+        // Not in the scan yet (made after it, or not reached): shown when it is the user's, inside a space
+        return owned && scope.relation(entry) == UserScope::Relation::INSIDE;
+    }
+
+    const size_t slash = entry.rfind('/');
+    const std::string parent = slash == std::string::npos ? entry : entry.substr(0, slash);
+    return owned && scope.relation(entry) == UserScope::Relation::INSIDE && scope.relation(parent) == UserScope::Relation::INSIDE;
+}
+
+uint64_t Scanner::fileValue(uint64_t bytes, uint64_t disk) const {
+    switch (metric.load()) {
+        case Metric::INODES: return 1;
+        case Metric::DISK:   return disk;
+        case Metric::BYTES:
+        default:             return bytes;
+    }
+}
+
 std::string Scanner::formatShort(uint64_t value) {
     return metric == Metric::INODES ? FormatUtils::toCount(value) : FormatUtils::toCompact(value);
 }
@@ -432,7 +456,8 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
             return false;
         }
 
-        if (disk >= GIB && newest > 0 && now - newest > old_after) {
+        // Only once scanned completely: a recent file not reached yet would make it look untouched
+        if (disk >= GIB && newest > 0 && now - newest > old_after && node.complete.load(std::memory_order_acquire)) {
             items.push_back(CleanupItem{path, "old data", "Nothing changed in it for " + FormatUtils::toAge(now - newest)
                                         + ": archive it elsewhere (no backups on ROMEO) or delete it", disk, inodes, newest, false});
             return false;
@@ -445,8 +470,17 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
     {
         std::lock_guard<std::mutex> lock(findings_mutex);
 
-        for (const auto& hit : findings.cores)
-            items.push_back(CleanupItem{filePath(hit.dir, hit.name), "core dump", "Memory dump of a crashed program: safe to delete", hit.disk, 1, hit.mtime, true});
+        // Files deleted since the scan (here or elsewhere) aren't suggested again
+        auto gone = [](const std::string& file) {
+            struct stat st;
+            return lstat(file.c_str(), &st) != 0;
+        };
+
+        for (const auto& hit : findings.cores) {
+            const std::string file = filePath(hit.dir, hit.name);
+            if (!gone(file))
+                items.push_back(CleanupItem{file, "core dump", "Memory dump of a crashed program: safe to delete", hit.disk, 1, hit.mtime, true});
+        }
 
         for (const auto& hit : findings.largest) {
             if (hit.disk < 100 * MIB) break;
@@ -455,8 +489,9 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
             const bool core = std::any_of(findings.cores.begin(), findings.cores.end(), [&hit](const Walker::FileHit& c) {
                 return c.dir == hit.dir && c.name == hit.name;
             });
-            if (!core)
-                items.push_back(CleanupItem{filePath(hit.dir, hit.name), "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
+            const std::string file = filePath(hit.dir, hit.name);
+            if (!core && !gone(file))
+                items.push_back(CleanupItem{file, "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
         }
     }
 
@@ -498,8 +533,9 @@ std::string lower(std::string_view s) {
 
 // `needle` is already in lower case
 bool containsNoCase(std::string_view hay, const std::string& needle) {
+    // Bytes compared as unsigned: with plain chars, every non-ASCII byte (é, 数, 🚀) failed to match
     return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(), [](char a, char b) {
-        return std::tolower(static_cast<unsigned char>(a)) == b;
+        return std::tolower(static_cast<unsigned char>(a)) == static_cast<unsigned char>(b);
     }) != hay.end();
 }
 

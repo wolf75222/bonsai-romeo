@@ -7,6 +7,7 @@
 bonsai-romeo starts on **your spaces**: home, scratch, and one entry per project you belong to. `ENTER` opens a folder. `⌫` or `ESC` goes back up, and from a space straight back to the list of spaces. The title shows where you are.
 
 - Sizes marked `~` aren't final yet: they come from the previous scan while this one runs. A folder switches to its new size once it is scanned.
+- `?`: a folder of yours the scan doesn't know, not reached yet or made after the scan. Run bonsai-romeo again to get its size.
 - `+1.2%` / `-0.5%` is the change since the previous scan.
 - `F` cycles through size, size on disk (what the space quota counts) and number of files (what the file quota counts). Use the file count to find what fills your file quota.
 - In the chart, the selected folder is white and its sub-folders are paler. There are 2 rings while scanning, then up to 4.

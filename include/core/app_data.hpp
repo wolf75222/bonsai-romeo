@@ -5,6 +5,7 @@
 #pragma once
 
 #include <ftxui/screen/color.hpp>
+#include <atomic>
 #include <condition_variable>
 #include <vector>
 #include <mutex>
@@ -29,6 +30,7 @@ public:
 
         bool is_dir;
         bool final = true;   // false: from the previous scan, or still being scanned (shown with ~)
+        bool known = true;   // false: not in the scan, made after it or not reached yet (shown as ?)
     };
 
     struct BonsaiPieEntry {
@@ -61,8 +63,19 @@ public:
         std::shared_ptr<std::string> path;
         std::shared_ptr<int> selected;
 
-        // Entry to select once the menu lists it (set when the cleanup view opens a path), under menu_mutex
+        /* Entry to select once the menu publishes a list for `select_path` (under menu_mutex)
+        - Set after F, going up or down, or opening a path from search / cleanup; "" selects the first entry
+        - Resolved in that new list: the list on screen may be the old folder's, or in the old order
+        */
+        std::string select_path;
         std::string select_label;
+        uint64_t select_generation = 0;
+
+        // Bumped by each request above; a list built before a request (in the old order, after F) can't resolve it
+        std::atomic<uint64_t> list_generation{0};
+
+        // Bumped when what folders hold changed (a deletion): their listings are read again (see Listing)
+        std::atomic<uint64_t> listing_version{0};
 
         std::mutex cv_mutex;
         std::condition_variable cv;

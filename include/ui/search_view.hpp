@@ -34,6 +34,7 @@ public:
         uint64_t version = 0;         // Bumped with every new list of hits
         bool searching = false;
         bool partial = false;         // The scan was still running
+        bool open_when_ready = false; // ENTER came before the hits: the first one opens when they arrive
         int64_t now = 0;
     };
 

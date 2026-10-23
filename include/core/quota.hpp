@@ -69,8 +69,8 @@ public:
         int alerts() const;  // Rows needing attention (grace, expired, hard)
     };
 
-    // Queries GPFS. Takes up to a few seconds, blocks the caller.
-    static Report fetch();
+    // Queries GPFS. Takes up to a few seconds, blocks the caller. Gives up between two queries once `stopped` says so.
+    static Report fetch(const std::function<bool()>& stopped = {});
 
     static const char* stateName(State s);
 };

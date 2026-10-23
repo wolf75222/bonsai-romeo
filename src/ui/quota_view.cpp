@@ -213,6 +213,13 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
     content.push_back(text(" " + summary(report)) | bold | color(stateColor(report.worst() == Quota::State::NO_LIMIT ? Quota::State::OK : report.worst())));
     content.push_back(text(" "));
 
+    // Files that can make writes fail: first, so they never fall below the screen
+    if (!report.stray_group.empty()) {
+        Elements lines;
+        for (const auto& l : strayHelp(report)) lines.push_back(paragraph(" " + l));
+        content.push_back(window(text(" Files outside of the project quota ") | bold | color(stateColor(Quota::State::GRACE)), vbox(std::move(lines))));
+    }
+
     for (const auto& row : report.rows) {
         if (!row.space.limited() && !row.inodes.limited()) {
             // The user quota on projet: counted on the project groups instead
@@ -230,11 +237,6 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
         })));
     }
 
-    if (!report.stray_group.empty()) {
-        Elements lines;
-        for (const auto& l : strayHelp(report)) lines.push_back(paragraph(" " + l));
-        content.push_back(window(text(" Files outside of the project quota ") | bold | color(stateColor(Quota::State::GRACE)), vbox(std::move(lines))));
-    }
 
     content.push_back(text(" "));
     content.push_back(hbox({

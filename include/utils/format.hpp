@@ -4,6 +4,9 @@
 #include <iomanip>
 #include <cstdint>
 #include <string>
+#include <vector>
+#include <algorithm>
+#include <ftxui/screen/string.hpp>
 
 class FormatUtils {
 public:
@@ -124,26 +127,72 @@ public:
         return str.size();
     }
 
+    // Width on screen, in columns: CJK characters and most emoji take two (FTXUI's own measure)
+    static size_t width(const std::string& str) {
+        return static_cast<size_t>(std::max(0, ftxui::string_width(str)));
+    }
+
+    // Byte length of the UTF-8 character starting at `str[i]`
+    static size_t charLength(const std::string& str, size_t i) {
+        const unsigned char c = static_cast<unsigned char>(str[i]);
+        const size_t len = c < 0x80 ? 1 : c < 0xE0 ? 2 : c < 0xF0 ? 3 : 4;
+        return std::min(len, str.size() - i);
+    }
+
+    // The longest start of `str` (whole characters) at most `cols` wide
+    static std::string fitStart(const std::string& str, size_t cols) {
+        std::string out;
+        size_t used = 0;
+        for (size_t i = 0; i < str.size();) {
+            const size_t len = charLength(str, i);
+            const std::string ch = str.substr(i, len);
+            const size_t w = width(ch);
+            if (used + w > cols) break;
+            out += ch;
+            used += w;
+            i += len;
+        }
+        return out;
+    }
+
+    // The longest end of `str` (whole characters) at most `cols` wide
+    static std::string fitEnd(const std::string& str, size_t cols) {
+        std::vector<std::string> chars;
+        for (size_t i = 0; i < str.size(); i += charLength(str, i))
+            chars.push_back(str.substr(i, charLength(str, i)));
+
+        std::string out;
+        size_t used = 0;
+        for (size_t k = chars.size(); k-- > 0;) {
+            const size_t w = width(chars[k]);
+            if (used + w > cols) break;
+            out = chars[k] + out;
+            used += w;
+        }
+        return out;
+    }
+
     // Keeps the start and the end (the file name) of a long path: /project/r1/.../releases/full-4bc/f.sqsh
     static std::string trimMiddle(const std::string& str, size_t max_size) {
-        const size_t len = length(str);
-        if (len <= max_size || max_size < 8)
-            return len <= max_size ? str : trimSuffix(str, max_size, "...");
+        if (width(str) <= max_size)
+            return str;
+        if (max_size < 8)
+            return trimSuffix(str, max_size, "...");
 
         const size_t keep_end = (max_size - 3) * 2 / 3;
         const size_t keep_start = max_size - 3 - keep_end;
-        return str.substr(0, offsetOf(str, keep_start)) + "..." + str.substr(offsetOf(str, len - keep_end));
+        return fitStart(str, keep_start) + "..." + fitEnd(str, keep_end);
     }
 
-    // Cuts at `max_size` characters (not bytes: "é" is two bytes), ending with `suffix`
+    // Cuts to `max_size` columns (not bytes, not characters: "数" takes two), ending with `suffix`
     static std::string trimSuffix(const std::string& str, size_t max_size, const std::string& suffix) {
-        if (length(str) <= max_size)
+        if (width(str) <= max_size)
             return str;
 
-        if (suffix.size() >= max_size)
-            return suffix.substr(0, max_size);
+        const size_t suffix_width = width(suffix);
+        if (suffix_width >= max_size)
+            return fitStart(suffix, max_size);
 
-        size_t cut = max_size - suffix.size();
-        return str.substr(0, offsetOf(str, cut)) + suffix;
+        return fitStart(str, max_size - suffix_width) + suffix;
     }
 };

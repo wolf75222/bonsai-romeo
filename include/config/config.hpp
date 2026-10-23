@@ -61,16 +61,34 @@ public:
     /* Lazy initialization using a lambda:
     - Ensures config is loaded once at first access
     - If the config file does not exist, create it with defaults
-    - Parse the file, or throw if invalid
+    - Parse the file over the embedded defaults; if it can't be read or parsed, the defaults alone
     */
     static const Config& get() {
         static Config instance = []() -> Config {
-            if (!ensureConfigFile()) throw std::runtime_error("Cannot create config file");
-            std::string path = getUserConfigPath();
+            /* Never fatal
+            - The file can't be created when the home is over its quota (or read-only): that's precisely
+              when bonsai-romeo is needed, so the embedded defaults are used instead of throwing
+            */
+            // The embedded defaults first: a key missing from the user's file (an older one) keeps its default
+            std::istringstream defaults(std::string(reinterpret_cast<const char*>(bonsai_default), bonsai_default_len));
+            const Config base = parseConfig(defaults).value_or(Config());
 
-            auto config = parseConfigFile(path);
-            if (!config) throw std::runtime_error("Invalid config file");
-            return *config;
+            std::optional<Config> config;
+            if (ensureConfigFile()) {
+                std::ifstream in(getUserConfigPath());
+                if (in.is_open())
+                    config = parseConfig(in, base);
+            }
+
+            Config cfg = config ? *config : base;
+
+            // The pie picks colors from this list: never empty (it divides by its size)
+            if (cfg.CHART_COLORS.empty())
+                cfg.CHART_COLORS = base.CHART_COLORS;
+            if (cfg.CHART_COLORS.empty())
+                cfg.CHART_COLORS = {{255, 99, 71}, {30, 144, 255}, {60, 179, 113}, {255, 165, 0}};
+
+            return cfg;
         }();
         return instance;
     }
@@ -80,6 +98,8 @@ public:
     - That is the only thing that can change programmatically, for now
     - All other keys are copied verbatim from the user's existing file so
       manual edits (comments, formatting, etc.) survive the rewrite
+    - Nothing is written when nothing changed, and the new file replaces the old one only once it is fully
+      written: a home over its quota used to leave an empty config behind
     */
     bool writeToFile() const {
         std::string path = getUserConfigPath();
@@ -109,16 +129,39 @@ public:
             }
         }
 
+        // CHART_COLORS spans several lines: the user's block is copied whole
+        auto [user_start, user_len] = findBlockSpan(userConfig, "CHART_COLORS");
+        auto [config_start, config_len] = findBlockSpan(config, "CHART_COLORS");
+        if (user_start != std::string::npos && config_start != std::string::npos)
+            config.replace(config_start, config_len, userConfig.substr(user_start, user_len));
+
         // SIDEBAR_WIDTH is the one field this class can change at runtime,
         // so we write our in-memory value instead of copying from disk.
         copyValue(config, "SIDEBAR_WIDTH = " + std::to_string(SIDEBAR_WIDTH), "SIDEBAR_WIDTH");
 
-        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (config == userConfig)
+            return true;
+
+        // Written next to the file (the one a symlink points to), then renamed over it
+        std::error_code ec;
+        fs::path target = fs::weakly_canonical(path, ec);
+        if (ec) target = path;
+        const fs::path tmp = target.string() + ".tmp";
+
+        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
         if (!out.is_open())
             return false;
 
         out.write(config.data(), static_cast<std::streamsize>(config.size()));
-        return out.good();
+        out.close();
+
+        if (out.good())
+            fs::rename(tmp, target, ec);
+        if (!out.good() || ec) {
+            fs::remove(tmp, ec);
+            return false;
+        }
+        return true;
     }
 
     static ftxui::Color growthColor() {
@@ -142,6 +185,10 @@ public:
 private:
     // Returns path to ~/.config/bonsai-romeo/bonsai.conf or empty string if HOME not set
     static std::string getUserConfigPath() {
+        // BONSAI_CONFIG: another config file (tests, or several setups)
+        if (const char* env = std::getenv("BONSAI_CONFIG"); env && *env)
+            return env;
+
         if (const auto* pw = getpwuid(getuid()); pw && pw->pw_dir) {
             return (fs::path(pw->pw_dir) / ".config/bonsai-romeo/bonsai.conf").string();
         }
@@ -154,6 +201,14 @@ private:
         if (!out.is_open()) return false;
 
         out.write(reinterpret_cast<const char*>(bonsai_default), bonsai_default_len);
+        out.close();
+
+        // A half-written file (home over quota) would be read back as an incomplete config
+        if (!out.good()) {
+            std::error_code ec;
+            fs::remove(path, ec);
+            return false;
+        }
         return true;
     }
 
@@ -166,8 +221,9 @@ private:
         std::string config_path = getUserConfigPath();
         fs::path config_dir = fs::path(config_path).parent_path();
 
-        if (!fs::exists(config_dir)) fs::create_directories(config_dir);
-        if (!fs::exists(config_path)) return writeDefaultConfig(config_path);
+        std::error_code ec;
+        if (!fs::exists(config_dir, ec)) fs::create_directories(config_dir, ec);
+        if (!fs::exists(config_path, ec)) return writeDefaultConfig(config_path);
 
         return true;
     }
@@ -196,10 +252,38 @@ private:
     }
 
     static void trim(std::string& s) {
-        size_t start = s.find_first_not_of(" \t");
+        size_t start = s.find_first_not_of(" \t\r");
         if (start == std::string::npos) { s.clear(); return; }
-        size_t end = s.find_last_not_of(" \t");
+        size_t end = s.find_last_not_of(" \t\r");
         s = s.substr(start, end - start + 1);
+    }
+
+    /* Where a comment starts in a value, or npos
+    - A '#' inside quotes is part of the value (an icon can be "#")
+    */
+    static size_t commentStart(const std::string& s, size_t from = 0) {
+        bool quoted = false;
+        for (size_t i = from; i < s.size() && s[i] != '\n'; i++) {
+            if (s[i] == '"') quoted = !quoted;
+            else if (s[i] == '#' && !quoted) return i;
+        }
+        return std::string::npos;
+    }
+
+    /* Finds the '=' after a key
+    - The key must start its line: not in a comment, nor at the end of a longer key
+    */
+    static size_t findKey(const std::string& source, const std::string& key) {
+        for (size_t pos = source.find(key); pos != std::string::npos; pos = source.find(key, pos + 1)) {
+            size_t line = pos;
+            while (line > 0 && (source[line - 1] == ' ' || source[line - 1] == '\t')) --line;
+            if (line > 0 && source[line - 1] != '\n') continue;
+
+            size_t eq = pos + key.size();
+            while (eq < source.size() && (source[eq] == ' ' || source[eq] == '\t')) ++eq;
+            if (eq < source.size() && source[eq] == '=') return eq;
+        }
+        return std::string::npos;
     }
 
     /* Finds value in config file for a given key
@@ -207,10 +291,7 @@ private:
     - for example, findValueSpan("PORT=8080", "PORT") would return <5, 4>
     */
     static std::pair<size_t, size_t> findValueSpan(const std::string& source, const std::string& key) {
-        size_t key_pos = source.find(key);
-        if (key_pos == std::string::npos) return {std::string::npos, 0};
-
-        size_t eq = source.find('=', key_pos);
+        size_t eq = findKey(source, key);
         if (eq == std::string::npos) return {std::string::npos, 0};
 
         size_t value_start = eq + 1;
@@ -220,10 +301,11 @@ private:
         }
 
         size_t value_end = value_start;
+        const size_t comment = commentStart(source, value_start);
         while (value_end < source.size() &&
+               value_end != comment &&
                source[value_end] != '\n' &&
-               source[value_end] != '\r' &&
-               source[value_end] != '#') {
+               source[value_end] != '\r') {
             ++value_end;
         }
 
@@ -233,6 +315,16 @@ private:
         }
 
         return {value_start, value_end - value_start};
+    }
+
+    // Span of a value written as [ ... ] over several lines, brackets included
+    static std::pair<size_t, size_t> findBlockSpan(const std::string& source, const std::string& key) {
+        auto [start, len] = findValueSpan(source, key);
+        if (start == std::string::npos || len == 0 || source[start] != '[') return {std::string::npos, 0};
+
+        const size_t end = source.find(']', start);
+        if (end == std::string::npos) return {std::string::npos, 0};
+        return {start, end + 1 - start};
     }
 
     /* Replaces the value for a given key in the config string with the value for that key from the source string
@@ -267,7 +359,7 @@ private:
     - Source for every "simple" config field (as in anything that is one key = one value)
     - Previously this lived as separate hand-written lists that had to be kept in sync by hand.
       CHART_COLORS is the one field that can't fit in this table, since parsing it consumes multiple lines from the stream;
-      It's still handled as a special case in parseConfigFile().
+      It's still handled as a special case in parseConfig().
     */
     static int parseValue(int*, const std::string& v) {
         return std::stoi(v);
@@ -317,6 +409,7 @@ private:
             {"SIDEBAR_BACK_ICON",                   makeSetter(&Config::SIDEBAR_BACK_ICON),                   true},
             {"SIDEBAR_GROWTH_COLOR",                makeSetter(&Config::SIDEBAR_GROWTH_COLOR),                true},
             {"SIDEBAR_SHRINK_COLOR",                makeSetter(&Config::SIDEBAR_SHRINK_COLOR),                true},
+            {"SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE", makeSetter(&Config::SIDEBAR_GROWTH_THRESHOLD_PERCENTAGE), true},
             {"CHART_MAX_SIZE_THRESHOLD_PERCENTAGE", makeSetter(&Config::CHART_MAX_SIZE_THRESHOLD_PERCENTAGE), true},
             {"CHART_MAX_GENERATIONS",               makeSetter(&Config::CHART_MAX_GENERATIONS),               true},
             {"CHART_MIN_SLICES",                    makeSetter(&Config::CHART_MIN_SLICES),                    true},
@@ -338,7 +431,7 @@ private:
         return nullptr;
     }
 
-    static std::vector<std::array<int, 3>> parseColorList(const std::string& firstLineValue, std::ifstream& in) {
+    static std::vector<std::array<int, 3>> parseColorList(const std::string& firstLineValue, std::istream& in) {
         std::string block;
 
         if (firstLineValue.find('[') != std::string::npos) {
@@ -369,17 +462,18 @@ private:
     }
 
     /* Reads a config file and populates a Config object:
+    - Starts from `cfg`: keys the file doesn't have keep its values
     - Ignores empty lines and comments (#)
     - Splits lines by '=' into key/value
     - Trims leading/trailing spaces and tabs
     - Converts values to int, double, or string as appropriate
     - Special handling for CHART_COLORS array block
     */
-    static std::optional<Config> parseConfigFile(const std::string& config_path) {
-        std::ifstream in(config_path);
-        if (!in.is_open()) return std::nullopt;
+    static std::optional<Config> parseConfig(std::istream& in) {
+        return parseConfig(in, Config());
+    }
 
-        Config cfg;
+    static std::optional<Config> parseConfig(std::istream& in, Config cfg) {
         std::string line;
 
         while (std::getline(in, line)) {
@@ -392,6 +486,10 @@ private:
 
             std::string key = line.substr(0, eq);
             std::string value = line.substr(eq + 1);
+
+            // A comment after the value: "CHART_HIGHLIGHT_SUBTREE = true  # ..." was read as false
+            if (size_t comment = commentStart(value); comment != std::string::npos)
+                value.erase(comment);
 
             trim(key);
             trim(value);
@@ -406,7 +504,8 @@ private:
                 }
                 // Unknown keys are silently ignored, same as before.
             } catch (...) {
-                return std::nullopt;
+                // A value that doesn't parse ("SIDEBAR_WIDTH = abc"): that key keeps its default, the others are read
+                continue;
             }
         }
 

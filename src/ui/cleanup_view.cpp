@@ -42,9 +42,10 @@ size_t pathWidth() {
 
 }
 
-void BonsaiCleanup::fill(State& state, Scanner& scanner) {
-    state.all = scanner.cleanup();
-    state.partial = !scanner.isDone();
+void BonsaiCleanup::set(State& state, std::vector<Scanner::CleanupItem> items, bool partial) {
+    state.all = std::move(items);
+    state.partial = partial;
+    state.computing = false;
     state.now = std::time(nullptr);
     apply(state);
 }
@@ -124,7 +125,9 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
         for (const auto& item : state->items)
             total += item.disk;
 
-        Element list = state->items.empty()
+        Element list = state->computing
+            ? text(" Looking for what could be cleaned...") | color(Color::GrayLight)
+            : state->items.empty()
             ? text(" Nothing to suggest: no cache, build folder, old data or large file found.") | color(Color::GrayLight)
             : menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 20);
 

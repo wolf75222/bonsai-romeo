@@ -25,11 +25,12 @@ public:
         int filter = 0;                    // See FILTERS in cleanup_view.cpp
         int selected = 0;
         bool partial = false;              // The scan is still running
+        bool computing = false;            // The suggestions are being looked for (on their own thread)
         int64_t now = 0;
     };
 
-    // Fills `state` from the scanner, when the window opens
-    static void fill(State& state, Scanner& scanner);
+    // Fills `state` with suggestions computed elsewhere (Scanner::cleanup() walks the whole tree): UI thread only
+    static void set(State& state, std::vector<Scanner::CleanupItem> items, bool partial);
 
     // Keeps the items of the current filter
     static void apply(State& state);
