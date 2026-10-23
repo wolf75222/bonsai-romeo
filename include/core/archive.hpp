@@ -9,6 +9,8 @@
 
 #pragma once
 
+#include "progress.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <functional>
@@ -27,11 +29,10 @@ public:
     // A free name next to `dir`: dir.tar, else dir.1.tar, dir.2.tar...
     static std::string archiveName(const std::string& dir);
 
-    /* pack(dir, progress, child, stop)
+    /* pack(dir, progress, child)
     - Writes `dir` into its .tar, then checks it. Blocks until done: run it on its own thread.
-    - progress(done, total) is called now and then, from that thread.
-    - `child` holds tar's pid while it runs; once `stop` is set, killing it ends pack() early.
+    - `progress` shows each step and the entries as tar writes them; its `stop` stops it.
+    - `child` holds tar's pid while it runs: killing it ends pack() early.
     */
-    static Result pack(const std::string& dir, const std::function<void(uint64_t, uint64_t)>& progress,
-                       std::atomic<pid_t>& child, const std::atomic<bool>& stop);
+    static Result pack(const std::string& dir, Progress& progress, std::atomic<pid_t>& child);
 };

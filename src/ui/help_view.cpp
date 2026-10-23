@@ -34,7 +34,7 @@ const std::vector<Group> GROUPS = {
         {"R", "scan the folder shown again (in the quota view: read the quotas again)"},
     }},
     {"Cleaning", {
-        {"SPACE", "mark or unmark the entry (X clears the marks)"},
+        {"SPACE  *", "mark or unmark the entry; * every entry of the folder (X clears)"},
         {"D  SUPPR", "delete the entry, or every marked one (asks first)"},
         {"T", "pack a folder into one .tar: thousands of files become one (asks first)"},
         {"Y", "copy the path (terminals with OSC 52: iTerm2, Ghostty, WezTerm, kitty...)"},
@@ -44,6 +44,7 @@ const std::vector<Group> GROUPS = {
         {"C", "cleanup suggestions"},
         {"U", "quotas; 1 to 9 there opens that space in the explorer"},
         {"W", "what grew since the previous scan"},
+        {"P", "progress of a deletion, packing or scan running (S there stops it)"},
         {"!", "folders that couldn't be read (when there are)"},
         {"?", "this help"},
         {"Q", "quit"},

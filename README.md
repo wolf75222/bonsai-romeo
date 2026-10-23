@@ -35,7 +35,7 @@ bonsai-romeo --quota --json    # the same as JSON (also --summary, --cleanup)
 | `U` | quotas, then `1`-`9` to open a space |
 | `W` | what grew since the previous scan |
 | `R` | scan the folder again |
-| `SPACE` / `D` | mark / delete (asks first) |
+| `SPACE` / `*` / `D` | mark / mark all / delete, with a progress bar |
 | `T` | pack a folder into one `.tar` (file quota) |
 | `Y` | copy the path |
 | `?` | every key |

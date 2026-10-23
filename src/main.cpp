@@ -11,6 +11,7 @@
 #include "../include/ui/errors_view.hpp"
 #include "../include/ui/growth_view.hpp"
 #include "../include/ui/help_view.hpp"
+#include "../include/ui/progress_view.hpp"
 #include "../include/ui/search_view.hpp"
 #include "../include/utils/format.hpp"
 #include "../include/utils/json.hpp"
@@ -354,7 +355,8 @@ int main(int argc, char* argv[]) {
 
     /* Background jobs: deleting, packing a folder into one file, scanning a folder again
     - On their own thread, one at a time: GPFS can take minutes, the explorer stays usable
-    - The title says what runs; when it ends, a notice says how it went, or the error window does
+    - The progress window shows how far they got, live (see BonsaiProgress); ESC hides it, S stops the job
+    - When one ends, a notice says how it went, or the error window does
     - Quitting waits for a deletion to finish; packing and scanning are stopped (nothing is lost)
     */
     struct JobResult {
@@ -363,23 +365,58 @@ int main(int argc, char* argv[]) {
         std::string message;               // The notice, or the error
         std::vector<std::string> deleted;  // Paths gone: their marks go too
     };
+    enum class Job { DELETE, PACK, RESCAN };
 
     std::thread job_thread;
-    std::atomic<bool> job_running{false};
-    std::atomic<bool> job_stoppable{false};
+    std::thread job_ticker;
+    std::atomic<bool> job_running{false};  // Until the UI took its result
+    std::atomic<bool> job_working{false};  // Until its thread is done (the UI may be gone by then)
     std::atomic<bool> quitting{false};
+    Job job_kind = Job::DELETE;            // UI thread only
     std::string job_label;                 // UI thread only: "deleting ~/x"
-    std::atomic<uint64_t> job_done{0};
-    std::atomic<uint64_t> job_total{0};
     std::atomic<pid_t> tar_child{0};
-    std::atomic<bool> tar_stop{false};
+
+    // The progress window (key P shows it again once hidden)
+    BonsaiProgress::Job progress_job;      // UI thread only
+    bool show_progress = false;
+    bool progress_hidden = false;
 
     // Set once the marks summary exists (below): what is deleted leaves the marks
     std::function<void()> marks_changed;
 
+    // Closes the progress window a moment after its job ended (a thread: nothing else redraws then)
+    std::thread progress_closer;
+    std::atomic<bool> closer_running{false};
+
     // UI thread: what a job did
     auto finishJob = [&](const JobResult& r) {
         job_running = false;
+        progress_hidden = false;
+
+        // Still shown: the window says how it ended, for a moment (an error has its own window)
+        if (show_progress && !r.failed) {
+            progress_job.finished = true;
+            progress_job.result = r.message;
+
+            // One at a time; the UI never waits for it (when one still sleeps, ESC closes this window)
+            if (!closer_running) {
+                if (progress_closer.joinable())
+                    progress_closer.join();
+                closer_running = true;
+                progress_closer = std::thread([&, progress = progress_job.progress] {
+                    for (int i = 0; i < 25 && !quitting; i++)
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                    screen.Post([&, progress] {
+                        if (progress_job.finished && progress_job.progress == progress)
+                            show_progress = false;
+                    });
+                    screen.PostEvent(Event::Custom);
+                    closer_running = false;
+                });
+            }
+        } else {
+            show_progress = false;
+        }
 
         for (const auto& gone : r.deleted) {
             for (auto it = data->marked.begin(); it != data->marked.end();)
@@ -401,70 +438,118 @@ int main(int argc, char* argv[]) {
         wake();
     };
 
-    auto startJob = [&](const std::string& label, bool stoppable, std::function<JobResult()> work) {
+    // "Deleting ~/x" for the window, from "deleting ~/x"
+    auto titled = [](std::string label) {
+        if (!label.empty())
+            label[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(label[0])));
+        return label;
+    };
+
+    auto startJob = [&](const std::string& label, Job kind, std::function<JobResult(Progress&)> work) {
         if (job_running) {
-            say("wait: " + job_label + " first");
+            show_progress = true;
+            progress_hidden = false;
             return;
         }
         if (job_thread.joinable())
             job_thread.join();
+        if (job_ticker.joinable())
+            job_ticker.join();
 
+        auto progress = std::make_shared<Progress>();
         job_running = true;
-        job_stoppable = stoppable;
+        job_working = true;
+        job_kind = kind;
         job_label = label;
-        job_done = 0;
-        job_total = 0;
+        progress_job = BonsaiProgress::Job{titled(label), progress, kind != Job::RESCAN, false, ""};
+        progress_hidden = false;
 
-        job_thread = std::thread([&, work] {
-            const JobResult r = work();
+        job_thread = std::thread([&, work, progress] {
+            const JobResult r = work(*progress);
+            job_working = false;
             screen.Post([&, r] { finishJob(r); });
             screen.PostEvent(Event::Custom);
         });
+
+        // Redrawn a few times a second while it runs; the window opens unless it is over at once (one file)
+        job_ticker = std::thread([&, progress] {
+            const auto start = std::chrono::steady_clock::now();
+            bool opened = false;
+            while (job_working) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                if (!opened && std::chrono::steady_clock::now() - start > std::chrono::milliseconds(400)) {
+                    opened = true;
+                    screen.Post([&, progress] {
+                        if (job_running && progress_job.progress == progress && !progress_hidden)
+                            show_progress = true;
+                    });
+                }
+                screen.PostEvent(Event::Custom);
+            }
+        });
     };
 
-    // From a job's thread: what the title says
+    // From a job's thread: what the title and the window say
     auto relabel = [&](const std::string& label) {
-        screen.Post([&, label] { job_label = label; });
+        screen.Post([&, label] {
+            job_label = label;
+            progress_job.title = titled(label);
+        });
         screen.PostEvent(Event::Custom);
     };
 
     /* Deleting (D)
+    - On several threads, with its progress (see Scanner::remove()); stopping leaves the rest as it is
     - What is inside a folder deleted just before is gone with it
-    - A deleted file that changed since the scan may not have been counted with its current size: its folder is
-      scanned again (see Scanner::remove()), each folder once, so the totals stay exact
+    - A folder stopped midway, or a deleted file that changed since the scan, may not match what the scan
+      counted: it is scanned again, each folder once, so the totals stay exact
     */
-    auto removeAll = [&](const std::vector<std::string>& paths) {
+    auto removeAll = [&](const std::vector<std::string>& paths, Progress& progress) {
         JobResult r;
         std::vector<std::string> failures;
         std::vector<std::string> rescans;
         std::string remark;
+        bool stopped = false;
 
-        for (const auto& path : paths) {
+        for (size_t i = 0; i < paths.size() && !stopped; i++) {
+            const std::string& path = paths[i];
             if (std::any_of(r.deleted.begin(), r.deleted.end(), [&path](const std::string& d) { return UserScope::isUnder(path, d); })) {
                 r.deleted.push_back(path);
                 continue;
             }
 
-            const Scanner::ScannerRemoveResult removed = scanner.remove(path);
+            if (paths.size() > 1)
+                relabel("deleting " + scope.display(path) + " (" + std::to_string(i + 1) + " of " + std::to_string(paths.size()) + ")");
+
+            const Scanner::ScannerRemoveResult removed = scanner.remove(path, &progress);
+            stopped = progress.stop.load();
+            if (!removed.rescan.empty())
+                rescans.push_back(removed.rescan);
+
             if (removed.failed) {
                 failures.push_back((paths.size() > 1 ? scope.display(path) + ": " : "") + removed.reason);
                 continue;
             }
 
-            r.deleted.push_back(path);
-            if (!removed.rescan.empty())
-                rescans.push_back(removed.rescan);
-            if (!removed.reason.empty())
+            if (stopped) {
+                remark = removed.reason.empty() ? "stopped" : removed.reason;
+                if (!removed.rescan.empty())
+                    continue;
+            } else if (!removed.reason.empty()) {
                 remark = removed.reason;
+            }
+            r.deleted.push_back(path);
         }
 
+        // Exact totals, even after a stop (S again skips it)
+        progress.stop = false;
         std::sort(rescans.begin(), rescans.end());
         rescans.erase(std::unique(rescans.begin(), rescans.end()), rescans.end());
-        for (size_t i = 0; i < rescans.size() && !quitting; i++) {
+        for (size_t i = 0; i < rescans.size() && !quitting && !progress.stop.load(); i++) {
             if (i > 0 && UserScope::isUnder(rescans[i], rescans[i - 1]))
                 continue;
             relabel("scanning " + scope.display(rescans[i]) + " again for exact totals");
-            scanner.rescan(rescans[i]);
+            scanner.rescan(rescans[i], &progress);
         }
 
         if (!failures.empty()) {
@@ -478,22 +563,25 @@ int main(int argc, char* argv[]) {
             return r;
         }
 
-        r.message = paths.size() == 1 ? "deleted " + scope.display(paths.front()) : "deleted " + std::to_string(paths.size()) + " entries";
-        if (!remark.empty())
-            r.message += " (" + remark + ")";
+        const std::string took = " in " + FormatUtils::toDuration(std::chrono::duration<double>(std::chrono::steady_clock::now() - progress.started).count());
+        if (stopped)
+            r.message = remark;
+        else
+            r.message = (paths.size() == 1 ? "deleted " + scope.display(paths.front()) : "deleted " + std::to_string(paths.size()) + " entries") + took
+                      + (remark.empty() ? "" : " (" + remark + ")");
         return r;
     };
 
     // Packing a folder into one .tar (T), then deleting the folder once the archive is checked
-    auto packFolder = [&](const std::string& path) {
+    auto packFolder = [&](const std::string& path, Progress& progress) {
         JobResult r;
-        const Archive::Result packed = Archive::pack(path, [&](uint64_t done, uint64_t total) {
-            job_done = done;
-            job_total = total;
-            screen.PostEvent(Event::Custom);
-        }, tar_child, tar_stop);
+        const Archive::Result packed = Archive::pack(path, progress, tar_child);
 
         if (!packed.ok) {
+            if (progress.stop.load()) {
+                r.message = "stopped: nothing was packed nor deleted";
+                return r;
+            }
             r.failed = true;
             r.title = "Packing " + FormatUtils::trimMiddle(scope.display(path), 60) + " failed";
             r.message = "Nothing was deleted. " + packed.error;
@@ -503,12 +591,16 @@ int main(int argc, char* argv[]) {
         scanner.addFile(packed.archive);
 
         relabel("deleting " + scope.display(path) + " (packed)");
-        const Scanner::ScannerRemoveResult removed = scanner.remove(path);
-        if (removed.failed) {
-            r.failed = true;
+        const Scanner::ScannerRemoveResult removed = scanner.remove(path, &progress);
+        if (removed.failed || progress.stop.load()) {
+            if (!removed.rescan.empty()) {
+                progress.stop = false;
+                scanner.rescan(removed.rescan, &progress);
+            }
+            r.failed = removed.failed;
             r.title = "Packed, but the folder is still there";
             r.message = scope.display(packed.archive) + " is complete and checked, but " + scope.display(path)
-                      + " couldn't be deleted: " + removed.reason;
+                      + (removed.failed ? " couldn't be deleted: " + removed.reason : " wasn't deleted: " + removed.reason);
             return r;
         }
 
@@ -519,15 +611,15 @@ int main(int argc, char* argv[]) {
     };
 
     // Scanning folders again (R)
-    auto rescanAll = [&](const std::vector<std::string>& paths) {
+    auto rescanAll = [&](const std::vector<std::string>& paths, Progress& progress) {
         JobResult r;
         for (const auto& path : paths) {
-            if (quitting)
+            if (quitting || progress.stop.load())
                 break;
             relabel("scanning " + scope.display(path) + " again");
-            const Scanner::RescanResult done = scanner.rescan(path);
+            const Scanner::RescanResult done = scanner.rescan(path, &progress);
             if (!done.message.empty())
-                r.message = done.failed ? done.message : "scanned again: " + done.message;
+                r.message = done.failed || done.message.rfind("stopped", 0) == 0 ? done.message : "scanned again: " + done.message;
         }
         if (paths.size() > 1 && r.message.rfind("scanned again", 0) == 0)
             r.message = "scanned your " + std::to_string(paths.size()) + " spaces again";
@@ -549,12 +641,11 @@ int main(int argc, char* argv[]) {
 
             if (confirm_kind == Confirm::PACK) {
                 const std::string path = confirm_paths.front();
-                tar_stop = false;
-                startJob("packing " + scope.display(path), true, [&, path] { return packFolder(path); });
+                startJob("packing " + scope.display(path), Job::PACK, [&, path](Progress& progress) { return packFolder(path, progress); });
             } else {
                 const std::vector<std::string> paths = confirm_paths;
                 const std::string label = paths.size() == 1 ? "deleting " + scope.display(paths.front()) : "deleting " + std::to_string(paths.size()) + " entries";
-                startJob(label, false, [&, paths] { return removeAll(paths); });
+                startJob(label, Job::DELETE, [&, paths](Progress& progress) { return removeAll(paths, progress); });
             }
         },
         [&]{
@@ -672,7 +763,8 @@ int main(int argc, char* argv[]) {
         // Mac keyboards have no SUPPR key (their delete key is Backspace, which goes up a folder): D works everywhere
         if (event == Event::Delete || event == Event::Character('d') || event == Event::Character('D')) {
             if (job_running) {
-                say("wait: " + job_label + " first");
+                show_progress = true;
+                progress_hidden = false;
                 return true;
             }
 
@@ -737,7 +829,8 @@ int main(int argc, char* argv[]) {
         // Thousands of files become one: the file quota counts one file per entry
         if (event == Event::Character('t') || event == Event::Character('T')) {
             if (job_running) {
-                say("wait: " + job_label + " first");
+                show_progress = true;
+                progress_hidden = false;
                 return true;
             }
 
@@ -784,6 +877,30 @@ int main(int argc, char* argv[]) {
 
             // On to the next entry, as in most file managers
             menu_inner->OnEvent(Event::ArrowDown);
+            return true;
+        }
+
+        // Every entry of the folder shown; when they all are marked already, none
+        if (event == Event::Character('*')) {
+            std::vector<std::string> entries;
+            {
+                std::lock_guard<std::mutex> lock(data->menu_mutex);
+                for (const auto& entry : *data->menu_entries) {
+                    if (!entry.path.empty() && !scope.isRoot(entry.path))
+                        entries.push_back(entry.path);
+                }
+            }
+            if (entries.empty())
+                return true;
+
+            const bool all = std::all_of(entries.begin(), entries.end(), [&](const std::string& p) { return data->marked.count(p) > 0; });
+            for (const auto& path : entries) {
+                if (all) data->marked.erase(path);
+                else data->marked.insert(path);
+            }
+            refreshMarks();
+            if (all)
+                say("unmarked " + std::to_string(entries.size()) + " entries");
             return true;
         }
 
@@ -864,22 +981,25 @@ int main(int argc, char* argv[]) {
         const Scanner::Metric metric = scanner.getMetric();
         const AppData::Sort sort = data->sort.load();
 
-        // Where the explorer is, the way the user knows it; or what runs in the background
-        const bool noticing = !notice.empty() && std::chrono::steady_clock::now() < notice_until;
-        std::string busy;
-        if (job_running) {
-            busy = job_label + "...";
-            if (const uint64_t total = job_total.load(); total > 0)
-                busy += " " + FormatUtils::toCount(std::min(job_done.load(), total)) + "/" + FormatUtils::toCount(total);
-        }
-        const std::string here = job_running ? busy
-                               : noticing ? notice
-                               : scanner.isSpacesView(*data->path) ? "your spaces" : scope.display(*data->path);
+        // Where the explorer is, the way the user knows it (what runs, and what happened, go at the bottom)
+        const std::string here = scanner.isSpacesView(*data->path) ? "your spaces" : scope.display(*data->path);
         const size_t here_width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
         const char* metric_label = metric == Scanner::Metric::INODES ? " [files" : (metric == Scanner::Metric::DISK ? " [disk" : " [size");
         const char* sort_label = sort == AppData::Sort::NAME ? ", by name]" : sort == AppData::Sort::AGE ? ", oldest first]" : "]";
 
         Elements bottom;
+
+        // A job whose window is hidden (P shows it), or what just happened, for a few seconds
+        if (job_running && !show_progress) {
+            std::string busy = job_label;
+            if (progress_job.progress) {
+                if (const std::string done = BonsaiProgress::percent(*progress_job.progress); !done.empty())
+                    busy += "  " + done;
+            }
+            bottom.push_back(text(" " + FormatUtils::trimMiddle(busy + "  (P)", here_width)) | color(Color::GrayLight));
+        } else if (!notice.empty() && std::chrono::steady_clock::now() < notice_until) {
+            bottom.push_back(text(" " + FormatUtils::trimMiddle(notice, here_width)) | color(Color::RGB(60, 179, 113)));
+        }
 
         // Marked entries (SPACE): what D would delete
         if (!marks_line.empty())
@@ -904,7 +1024,7 @@ int main(int argc, char* argv[]) {
                 text(" "),
                 BonsaiQuotaView::badge(quotas.get(), quotas.ready()),
             }) | center,
-            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(job_running ? Color::RGB(255, 140, 0) : noticing ? Color::RGB(60, 179, 113) : Color::GrayLight),
+            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(Color::GrayLight),
             separator(),
             hbox({
                 menu_component->Render() | frame | flex,
@@ -1008,6 +1128,19 @@ int main(int argc, char* argv[]) {
 
     auto help_component = BonsaiHelp::window([&] { show_help = false; });
 
+    auto progress_component = BonsaiProgress::window(&progress_job, &scanner.getScope(),
+        [&] {
+            show_progress = false;
+            progress_hidden = !progress_job.finished;
+        },
+        [&] {
+            if (!progress_job.progress)
+                return;
+            progress_job.progress->stop = true;
+            if (const pid_t child = tar_child.load(); child > 0)
+                kill(child, SIGTERM);
+        });
+
     // Folder search (key /), searched on its own thread
     auto search_state = std::make_shared<BonsaiSearch::State>();
     BonsaiSearch::Worker search_worker(search_state, &scanner, [&screen] { screen.PostEvent(Event::Custom); });
@@ -1024,10 +1157,11 @@ int main(int argc, char* argv[]) {
     window |= Modal(growth_component, &show_growth);
     window |= Modal(errors_component, &show_errors);
     window |= Modal(help_component, &show_help);
+    window |= Modal(progress_component, &show_progress);
     window |= Modal(search_component, &show_search);
 
     auto modal_open = [&] {
-        return show_confirm_modal || show_error_modal || show_cleanup || show_search || show_help || show_growth || show_errors;
+        return show_confirm_modal || show_error_modal || show_cleanup || show_search || show_help || show_growth || show_errors || show_progress;
     };
 
     // Quit with q, allow sidebar resize with arrow keys
@@ -1046,6 +1180,15 @@ int main(int argc, char* argv[]) {
 
         if (event == Event::Character('?') && !modal_open()) {
             show_help = true;
+            return true;
+        }
+
+        // What runs in the background, again
+        if ((event == Event::Character('p') || event == Event::Character('P')) && !modal_open()) {
+            if (job_running) {
+                show_progress = true;
+                progress_hidden = false;
+            }
             return true;
         }
 
@@ -1099,8 +1242,8 @@ int main(int argc, char* argv[]) {
                 return true;
             }
 
-            startJob(paths.size() > 1 ? "scanning your spaces again" : "scanning " + scope.display(shown) + " again", true,
-                     [&, paths] { return rescanAll(paths); });
+            startJob(paths.size() > 1 ? "scanning your spaces again" : "scanning " + scope.display(shown) + " again", Job::RESCAN,
+                     [&, paths](Progress& progress) { return rescanAll(paths, progress); });
             return true;
         }
 
@@ -1284,19 +1427,34 @@ int main(int argc, char* argv[]) {
 
     /* What still runs in the background
     - Packing or scanning again: stopped (the folder stays as it was, the .part is removed)
-    - Deleting: waited for (it doesn't stop midway); a scan again it does after it stops
+    - Deleting: waited for, with its progress in the terminal (S in the window stops it before quitting);
+      the scans again it would do after it are skipped
     */
     quitting = true;
-    tar_stop = true;
-    if (const pid_t child = tar_child.load(); child > 0)
-        kill(child, SIGTERM);
-    scanner.stop();
-
-    if (job_thread.joinable()) {
-        if (job_running && !job_stoppable)
-            std::cerr << "Waiting for " << job_label << " to finish..." << std::endl;
-        job_thread.join();
+    if (job_working && job_kind != Job::DELETE && progress_job.progress) {
+        progress_job.progress->stop = true;
+        if (const pid_t child = tar_child.load(); child > 0)
+            kill(child, SIGTERM);
     }
+    if (!job_working || job_kind != Job::DELETE)
+        scanner.stop();
+
+    if (job_working && job_kind == Job::DELETE && progress_job.progress) {
+        std::cerr << "Waiting for " << job_label << " to finish (Ctrl+C leaves the rest as it is)..." << std::endl;
+        while (job_working) {
+            std::this_thread::sleep_for(std::chrono::seconds(2));
+            const std::string done = BonsaiProgress::percent(*progress_job.progress);
+            if (job_working && !done.empty())
+                std::cerr << "  " << done << " (" << FormatUtils::withSeparators(progress_job.progress->done.load()) << " entries)" << std::endl;
+        }
+    }
+
+    if (job_thread.joinable())
+        job_thread.join();
+    if (job_ticker.joinable())
+        job_ticker.join();
+    if (progress_closer.joinable())
+        progress_closer.join();
 
 
     // Stop app

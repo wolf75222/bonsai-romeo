@@ -28,6 +28,7 @@ set(SRC
     src/core/dir_tree.cpp
     src/core/scanner.cpp
     src/core/quota.cpp
+    src/core/remover.cpp
     src/core/walker.cpp
 
     src/ui/cleanup_view.cpp
@@ -38,6 +39,7 @@ set(SRC
     src/ui/modal_confirm.cpp
     src/ui/modal_error.cpp
     src/ui/piechart.cpp
+    src/ui/progress_view.cpp
     src/ui/search_view.cpp
     src/ui/quota_view.cpp
 )

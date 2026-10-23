@@ -58,7 +58,7 @@ uint64_t countEntries(const std::string& dir, const std::atomic<bool>& stop) {
   the first line of stderr kept for the error message. Both pipes are read together, so tar never waits on one.
 - Returns tar's exit status, or -1 when it couldn't start, was killed or was stopped
 */
-int runTar(const std::vector<std::string>& args, const std::function<void()>& on_line, std::string& error,
+int runTar(const std::vector<std::string>& args, const std::function<void(const std::string&)>& on_line, std::string& error,
            std::atomic<pid_t>& child, const std::atomic<bool>& stop) {
     int out[2], err[2];
     if (pipe2(out, O_CLOEXEC) != 0) {
@@ -99,6 +99,7 @@ int runTar(const std::vector<std::string>& args, const std::function<void()>& on
     child = pid;
 
     std::string messages;
+    std::string line;   // A line of stdout still coming
     pollfd fds[2] = {{out[0], POLLIN, 0}, {err[0], POLLIN, 0}};
     char buffer[65536];
 
@@ -119,8 +120,14 @@ int runTar(const std::vector<std::string>& args, const std::function<void()>& on
             }
 
             if (&fd == &fds[0]) {
-                for (ssize_t i = 0; i < n; i++)
-                    if (buffer[i] == '\n') on_line();
+                for (ssize_t i = 0; i < n; i++) {
+                    if (buffer[i] != '\n') {
+                        if (line.size() < 4096) line += buffer[i];
+                        continue;
+                    }
+                    on_line(line);
+                    line.clear();
+                }
             } else if (messages.size() < 4096) {
                 messages.append(buffer, static_cast<size_t>(n));
             }
@@ -150,9 +157,9 @@ std::string Archive::archiveName(const std::string& dir) {
     return name;
 }
 
-Archive::Result Archive::pack(const std::string& dir, const std::function<void(uint64_t, uint64_t)>& progress,
-                              std::atomic<pid_t>& child, const std::atomic<bool>& stop) {
+Archive::Result Archive::pack(const std::string& dir, Progress& progress, std::atomic<pid_t>& child) {
     Result result;
+    const std::atomic<bool>& stop = progress.stop;
 
     const size_t slash = dir.rfind('/');
     if (slash == std::string::npos || slash + 1 >= dir.size()) {
@@ -162,6 +169,7 @@ Archive::Result Archive::pack(const std::string& dir, const std::function<void(u
     const std::string parent = slash == 0 ? "/" : dir.substr(0, slash);
     const std::string name = dir.substr(slash + 1);
 
+    progress.step("Counting what it holds");
     result.entries = countEntries(dir, stop);
     if (stop.load()) {
         result.error = "Stopped.";
@@ -172,11 +180,11 @@ Archive::Result Archive::pack(const std::string& dir, const std::function<void(u
     const std::string part = archive + ".part";
 
     // The archive holds "name/...": it unpacks where the folder was (tar -xf name.tar)
-    uint64_t done = 0;
+    progress.step("Packing into " + archive.substr(archive.rfind('/') + 1), result.entries);
     std::string error;
-    const int created = runTar({"-cvf", part, "-C", parent, "--", name}, [&] {
-        if ((++done & 1023) == 0)
-            progress(done, result.entries);
+    const int created = runTar({"-cvf", part, "-C", parent, "--", name}, [&](const std::string& entry) {
+        if ((progress.done++ & 7) == 0)
+            progress.note(0, parent + "/" + entry);
     }, error, child, stop);
 
     if (created != 0) {
@@ -184,11 +192,13 @@ Archive::Result Archive::pack(const std::string& dir, const std::function<void(u
         result.error = stop.load() ? "Stopped." : "tar failed" + (error.empty() ? std::string(".") : ": " + error);
         return result;
     }
-    progress(result.entries, result.entries);
-
     // Read back: every entry of the folder must be in it
+    progress.step("Checking the archive", result.entries);
     uint64_t listed = 0;
-    const int read_back = runTar({"-tf", part}, [&] { listed++; }, error, child, stop);
+    const int read_back = runTar({"-tf", part}, [&](const std::string&) {
+        listed++;
+        progress.done++;
+    }, error, child, stop);
 
     if (read_back != 0 || listed != result.entries) {
         unlink(part.c_str());

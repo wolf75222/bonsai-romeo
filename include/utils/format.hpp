@@ -97,6 +97,19 @@ public:
         return oss.str();
     }
 
+    // How long something takes: 45 s, 2 min 05 s, 1 h 03 min
+    static std::string toDuration(double seconds) {
+        const int64_t s = static_cast<int64_t>(seconds < 0 ? 0 : seconds + 0.5);
+        std::ostringstream oss;
+        if (s < 60)
+            oss << s << " s";
+        else if (s < 3600)
+            oss << s / 60 << " min " << std::setw(2) << std::setfill('0') << s % 60 << " s";
+        else
+            oss << s / 3600 << " h " << std::setw(2) << std::setfill('0') << (s % 3600) / 60 << " min";
+        return oss.str();
+    }
+
     // A count in a short format: 987, 12.3k, 1.50M
     static std::string toCount(uintmax_t count, const std::string& spacer = "") {
         std::ostringstream oss;

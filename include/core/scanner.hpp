@@ -24,6 +24,7 @@ Explanation:
 #pragma once
 
 #include "dir_tree.hpp"
+#include "progress.hpp"
 #include "user_scope.hpp"
 #include "walker.hpp"
 
@@ -88,7 +89,11 @@ public:
     // Saves the cache (see explanation)
     void snapshot();
 
-    ScannerRemoveResult remove(const fs::path& path);
+    /* remove(path, progress)
+    - Deletes a file, or a folder on several threads (see Remover), once all of it was checked deletable.
+    - `progress` (optional) shows how far it got, and can stop it: what is left stays, and is scanned again.
+    */
+    ScannerRemoveResult remove(const fs::path& path, Progress* progress = nullptr);
 
     void setMetric(Metric m) { metric = m; }
     Metric getMetric() const { return metric; }
@@ -141,7 +146,7 @@ public:
         std::string message;
         bool failed;
     };
-    RescanResult rescan(const std::string& path);
+    RescanResult rescan(const std::string& path, Progress* progress = nullptr);
 
     // A file made by bonsai-romeo (an archive): counted in its folder and the ones above
     void addFile(const std::string& path);

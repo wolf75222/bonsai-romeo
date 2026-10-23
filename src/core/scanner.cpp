@@ -1,6 +1,7 @@
 #include "../../include/core/scanner.hpp"
 
 #include "../../include/config/config.hpp"
+#include "../../include/core/remover.hpp"
 #include "../../include/utils/format.hpp"
 
 #include <algorithm>
@@ -130,77 +131,6 @@ const Junk* junk(const std::string& path) {
     }
 
     return nullptr;
-}
-
-/* Before removing a folder: can all of it be removed?
-- Removing an entry takes writing in, and entering, the folder holding it. remove_all() stops at the
-  first refusal and leaves the folder half deleted: so the whole tree is checked first, and nothing
-  is removed when something can't be.
-- Folders of the user's own without write permission (made read-only by a tool, or `chmod -w`) can
-  be fixed: they are listed to be made writable. Someone else's can't: `blocked` names one.
-- Only folders are looked at (one readdir each); files need a stat only in sticky folders.
-*/
-struct RemovalCheck {
-    std::vector<std::string> readonly;
-    std::string blocked;
-};
-
-RemovalCheck checkRemoval(const std::string& root, uid_t uid) {
-    RemovalCheck out;
-    std::vector<std::string> stack{root};
-
-    while (!stack.empty()) {
-        const std::string dir = std::move(stack.back());
-        stack.pop_back();
-
-        struct stat st;
-        if (lstat(dir.c_str(), &st) != 0 || !S_ISDIR(st.st_mode))
-            continue;
-
-        const bool usable = (st.st_mode & S_IRWXU) == S_IRWXU;
-        if (st.st_uid == uid) {
-            if (!usable) out.readonly.push_back(dir);
-        } else if (access(dir.c_str(), R_OK | W_OK | X_OK) != 0) {
-            out.blocked = dir;
-            return out;
-        }
-
-        // An unreadable folder of the user's can only be listed once fixed: it is taken as it comes
-        DIR* listing = opendir(dir.c_str());
-        if (!listing)
-            continue;
-
-        // In a sticky folder (like /tmp) only one's own entries can be removed
-        const bool sticky = (st.st_mode & S_ISVTX) && st.st_uid != uid;
-
-        while (const dirent* entry = readdir(listing)) {
-            const char* name = entry->d_name;
-            if (name[0] == '.' && (name[1] == '\0' || (name[1] == '.' && name[2] == '\0')))
-                continue;
-
-            std::string child = dir + "/" + name;
-            unsigned char type = entry->d_type;
-
-            if (type == DT_UNKNOWN || sticky) {
-                struct stat cs;
-                if (lstat(child.c_str(), &cs) != 0)
-                    continue;
-                if (sticky && cs.st_uid != uid) {
-                    out.blocked = child;
-                    closedir(listing);
-                    return out;
-                }
-                type = S_ISDIR(cs.st_mode) ? DT_DIR : DT_REG;
-            }
-
-            if (type == DT_DIR)
-                stack.push_back(std::move(child));
-        }
-
-        closedir(listing);
-    }
-
-    return out;
 }
 
 }
@@ -744,7 +674,11 @@ std::vector<Scanner::SearchHit> Scanner::search(const std::string& query, size_t
     return hits;
 }
 
-Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
+Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path, Progress* shown) {
+    // What the progress window shows (a deletion of a single file needs none)
+    Progress unseen;
+    Progress& progress = shown ? *shown : unseen;
+
     // Shared spaces (/project) hold other people's data: never touch it
     if (!scope.owns(path) || scope.relation(path.native()) != UserScope::Relation::INSIDE) {
         return ScannerRemoveResult{"This isn't yours: only your own files can be removed.", true};
@@ -786,10 +720,15 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
                                    + " is read-only (chmod u+w on it to delete what it holds).", true};
     }
 
-    // A folder: everything in it must be removable, or nothing is removed (see checkRemoval())
+    // A folder: everything in it must be removable, or nothing is removed (see Remover::check())
     size_t made_writable = 0;
+    Remover::Check check;
     if (is_dir) {
-        const RemovalCheck check = checkRemoval(path.string(), scope.uid);
+        progress.step("Checking that all of it can be deleted");
+        check = Remover::check(path.string(), scope.uid, progress);
+
+        if (progress.stop.load())
+            return ScannerRemoveResult{"stopped before anything was deleted", false};
 
         if (!check.blocked.empty()) {
             return ScannerRemoveResult{"Nothing was deleted: " + scope.display(check.blocked)
@@ -827,17 +766,28 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         }
     }
 
-    try {
-        if (is_dir) {
-            fs::remove_all(path, ec);
-        } else {
-            fs::remove(path, ec);
-        }
-    } catch (const fs::filesystem_error&) {}
+    if (is_dir) {
+        // On several threads (see Remover): what the scan counted in it is what the bar goes to
+        const Totals expected = totals(path);
+        progress.step("Deleting the files, then the folders: " + std::to_string(Remover::threads()) + " folders at a time", expected.inodes);
+        progress.disk = expected.disk;
 
-    // Everything was checked beforehand: this is unexpected (the disk changed meanwhile, an I/O error...)
-    if (ec) {
-        return ScannerRemoveResult{ec.message() + (is_dir ? ": part of it may already be deleted, and its size is out of date until the next scan." : ""), true};
+        const Remover::Result removed = Remover::remove(path.string(), check.folders, progress);
+
+        /* Still there: stopped, or a failure midway (everything was checked first: the disk changed meanwhile, an I/O error...)
+        - Part of it is gone: its totals come from scanning what is left (`rescan`)
+        */
+        struct stat st;
+        if (lstat(path.c_str(), &st) == 0) {
+            const std::string count = FormatUtils::withSeparators(removed.removed) + " entries deleted, the rest is still there";
+            if (progress.stop.load())
+                return ScannerRemoveResult{"stopped: " + count, false, path.string()};
+            return ScannerRemoveResult{(removed.error.empty() ? std::string("It couldn't all be deleted") : removed.error) + ". " + count + ".", true, path.string()};
+        }
+    } else {
+        fs::remove(path, ec);
+        if (ec)
+            return ScannerRemoveResult{ec.message(), true};
     }
 
     if (!is_dir) {
@@ -964,7 +914,7 @@ void Scanner::refreshErrorMarks(std::string dir) {
     }
 }
 
-Scanner::RescanResult Scanner::rescan(const std::string& target) {
+Scanner::RescanResult Scanner::rescan(const std::string& target, Progress* progress) {
     if (stopping.load())
         return RescanResult{"", true};
 
@@ -1001,11 +951,26 @@ Scanner::RescanResult Scanner::rescan(const std::string& target) {
     ov->tree = std::make_unique<DirTree>(target);
     ov->started_at = std::time(nullptr);
 
-    Walker walker(*ov->tree, scope, stopping, scanThreads());
-    walker.run();
+    // Shown: what is found so far, against what the previous scan found (stopped with the window, or on quit)
+    const std::atomic<bool>& stop = progress ? progress->stop : stopping;
+    if (progress)
+        progress->step("Scanning " + scope.display(target) + " again", before.inodes);
 
-    if (stopping.load())
-        return RescanResult{"", true};
+    std::atomic<bool> walking{true};
+    std::thread watch([&] {
+        while (progress && walking.load()) {
+            progress->done = ov->tree->node(DirTree::ROOT).inodes.load(std::memory_order_relaxed);
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    });
+
+    Walker walker(*ov->tree, scope, stop, scanThreads());
+    walker.run();
+    walking = false;
+    watch.join();
+
+    if (stop.load() || stopping.load())
+        return RescanResult{stopping.load() ? "" : "stopped: " + scope.display(target) + " keeps its previous totals", stopping.load()};
 
     const DirTree::Counts now = countsOf(ov->tree->node(DirTree::ROOT));
 

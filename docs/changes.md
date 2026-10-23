@@ -13,6 +13,7 @@
 - `R` scans a folder again, `W` lists what grew since the previous scan, `SPACE` marks entries for one deletion, `S` / `A` order by name or age, `Y` copies a path (OSC 52), `?` lists every key, vim keys, and `--json`.
 - Folders that couldn't be read are marked `!` and listed (`!`), instead of being silently counted as smaller.
 - A deleted file that changed after the scan started gets its folder scanned again, so the totals stay exact.
+- Deleting runs on 16 threads (one folder each, files deleted relative to their folder), the check before it too: 100,000 files in 6 s instead of about 15. A window shows the progress, the files being deleted, and can stop it; packing and scanning again use it too.
 - A window whose list was empty (a cleanup filter with nothing in it) took no key at all: ESC and TAB went nowhere.
 
 **Fixes that also apply to bonsai** (reported upstream)
