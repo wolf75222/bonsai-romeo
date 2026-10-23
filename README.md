@@ -20,7 +20,7 @@ What changes compared to upstream:
 - Own config and cache (`~/.config/bonsai-romeo/`, `~/.cache/bonsai-romeo/`), no `xxd` needed to build.
 
 > [!WARNING]
-> ROMEO has **no backups**: anything removed with `SUPPR` is gone for good.
+> ROMEO has **no backups**: anything removed with `D` / `SUPPR` is gone for good.
 
 ### Install on ROMEO (any user)
 
@@ -49,8 +49,12 @@ bonsai-romeo --summary             # sizes and file counts, no UI
 | `U` | quota dashboard / back to the pie chart |
 | `F` | switch between size and file count |
 | `R` | refresh the quotas |
-| `SUPPR` | delete the selected entry (yours only) |
+| `D` (or `SUPPR`) | delete the selected entry (yours only), after a confirmation |
+| `⌫` / `ESC` | go up a folder |
+| `ENTER` | open the selected folder |
 | `Q` | quit |
+
+On a Mac keyboard `⌫` is Backspace (go up), not delete: use `D` (or `fn` + `⌫`, which sends SUPPR).
 
 ### How quotas work on ROMEO
 

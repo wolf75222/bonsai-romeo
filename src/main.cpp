@@ -52,7 +52,7 @@ int main(int argc, char* argv[]) {
                          "  --summary   scan, print size and file count of each of your spaces, and exit\n"
                          "  --quota     print your GPFS quotas (space and files) with gauges, and exit\n"
                          "  BONSAI_ROOTS=dir1:dir2   override the detected spaces\n"
-                         "Keys: U quotas · F size / file count · R refresh quotas · SUPPR delete · Q quit\n";
+                         "Keys: U quotas · F size / file count · R refresh quotas · D (or SUPPR) delete · ⌫/ESC up · Q quit\n";
             return 0;
         } else {
             args.push_back(arg);
@@ -212,7 +212,8 @@ int main(int argc, char* argv[]) {
 
     auto menu_component = BonsaiMenu::menu(&screen, data, &scanner, &selected, default_path, option);
     menu_component = CatchEvent(menu_component, [data, &scanner, &default_path, &show_confirm_modal](Event event) {
-        if (event == Event::Delete) {
+        // Mac keyboards have no SUPPR key (their ⌫ is Backspace, which goes up a folder): D works everywhere
+        if (event == Event::Delete || event == Event::Character('d') || event == Event::Character('D')) {
             show_confirm_modal = true;
             return true;
         }
@@ -277,7 +278,7 @@ int main(int argc, char* argv[]) {
                 text(" ")
             }) | flex,
             separator(),
-            text(" U quotas · F size/files · Q quit") | color(Color::GrayDark),
+            text(" U quotas · F size/files · D delete · Q quit") | color(Color::GrayDark),
         });
     });
 
