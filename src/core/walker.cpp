@@ -41,7 +41,7 @@ constexpr unsigned MAX_THREADS = 256;
 
 }
 
-Walker::Walker(DirTree& _tree, const std::atomic<bool>& _stop, unsigned threads) : tree(_tree), stop(_stop), seen(SEEN_BUCKETS) {
+Walker::Walker(DirTree& _tree, const UserScope& _scope, const std::atomic<bool>& _stop, unsigned threads) : tree(_tree), scope(_scope), stop(_stop), seen(SEEN_BUCKETS) {
     if (threads == 0)
         threads = std::min(std::max(1u, std::thread::hardware_concurrency()) * AUTO_THREADS_PER_CORE, MAX_AUTO_THREADS);
 
@@ -166,6 +166,13 @@ void Walker::work(unsigned self) {
 void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
     tree.path(task.dir, scratch.path);
 
+    // Above the user's spaces nothing is counted, only the way down to them is listed
+    const UserScope::Relation relation = scope.relation(scratch.path);
+    if (relation == UserScope::Relation::OUTSIDE)
+        return;
+
+    const bool above_scope = relation == UserScope::Relation::ANCESTOR;
+
     const int fd = open(scratch.path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0)
         return;
@@ -207,13 +214,22 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
                 if (fstatat(fd, name, &file, AT_SYMLINK_NOFOLLOW) != 0)
                     continue;
 
-                if (S_ISREG(file.st_mode))
+                if (S_ISREG(file.st_mode) && !above_scope && file.st_uid == scope.uid)
                     file_bytes += static_cast<uint64_t>(file.st_size);
 
                 if (!S_ISDIR(file.st_mode))
                     continue;
 
                 type = TYPE_DIR;
+            }
+
+            if (type == TYPE_DIR && above_scope) {
+                scratch.child.assign(scratch.path == "/" ? "" : scratch.path);
+                scratch.child += '/';
+                scratch.child += name;
+
+                if (scope.relation(scratch.child) == UserScope::Relation::OUTSIDE)
+                    continue;
             }
 
             if (type == TYPE_DIR) {

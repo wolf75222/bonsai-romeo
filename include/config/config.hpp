@@ -1,6 +1,6 @@
 /* CONFIG
 Explanation:
-- This class handles loading Bonsai's configuration from ~/.config/bonsai/bonsai.conf
+- This class handles loading Bonsai's configuration from ~/.config/bonsai-romeo/bonsai.conf
 - It provides default values if the file doesn't exist
 - Configuration values include sidebar icons, chart parameters, colors, and UI sizing
 - Singleton pattern ensures only one Config object exists at runtime
@@ -136,12 +136,12 @@ public:
     }
 
 private:
-    // Returns path to ~/.config/bonsai/bonsai.conf or empty string if HOME not set
+    // Returns path to ~/.config/bonsai-romeo/bonsai.conf or empty string if HOME not set
     static std::string getUserConfigPath() {
         if (const auto* pw = getpwuid(getuid()); pw && pw->pw_dir) {
-            return (fs::path(pw->pw_dir) / ".config/bonsai/bonsai.conf").string();
+            return (fs::path(pw->pw_dir) / ".config/bonsai-romeo/bonsai.conf").string();
         }
-        return ".config/bonsai/bonsai.conf";
+        return ".config/bonsai-romeo/bonsai.conf";
     }
 
     // Writes the default configuration binary to the given path

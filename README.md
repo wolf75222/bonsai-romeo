@@ -1,3 +1,52 @@
+# Bonsai — ROMEO edition (`bonsai-romeo`)
+
+Fork of [orrnithogalum/bonsai](https://github.com/orrnithogalum/bonsai) for users of the
+[ROMEO 2025](https://romeo.univ-reims.fr/) cluster (URCA). It only shows **your** data, so you can
+clean up your quotas without wading through everyone else's files.
+
+What changes compared to upstream:
+
+- **Only your spaces are scanned**: `/home/$USER`, `/scratch_p/$USER`, and `/project/<group>`
+  for every project group you belong to (`id -Gn`). Everything else on GPFS is skipped.
+- **Only your files are counted and listed**: in shared `/project/<group>` folders, other
+  members' files are invisible, and their folders only appear if they contain files of yours.
+- **Deleting is limited to what you own**, inside your spaces.
+- `bonsai-romeo --summary [path]`: scan, print the size of each space, exit (no TUI, handy in a job).
+- `BONSAI_ROOTS=dir1:dir2 bonsai-romeo` overrides the detected spaces.
+- Own config and cache (`~/.config/bonsai-romeo/`, `~/.cache/bonsai-romeo/`), no `xxd` needed to build.
+
+Sizes are apparent sizes (sum of file sizes), not the block usage reported by `mmlsquota`.
+
+> [!WARNING]
+> ROMEO has **no backups**: anything removed with `SUPPR` is gone for good.
+
+### Build on ROMEO
+
+```bash
+git clone https://github.com/wolf75222/bonsai-romeo.git ~/bonsai-romeo
+cd ~/bonsai-romeo
+romeo_load_x64cpu_env
+spack load cmake
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j8
+mkdir -p ~/.local/bin && cp build/bonsai-romeo ~/.local/bin/
+```
+
+The login nodes are x86_64, so this binary runs there directly. If `spack load cmake` matches
+several packages, pick one by hash (`spack find -l cmake`, then `spack load /<hash>`).
+
+### Run
+
+```bash
+bonsai-romeo                       # all your spaces
+bonsai-romeo /project/r250127      # one project, only your files in it
+bonsai-romeo --summary             # sizes only, no UI
+```
+
+A full scan walks GPFS metadata and can take a couple of minutes; sizes fill in live.
+
+---
+
 # Bonsai
 
 Bonsai is a terminal user interface (TUI) remake of the GNOME Baobab disk usage analyzer.  

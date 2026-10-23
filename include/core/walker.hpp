@@ -12,11 +12,15 @@ Explanation:
     - Symlinks are skipped, so are sockets, pipes and devices.
     - /proc, /sys and network shares (NFS, SMB) are not entered.
     - A directory is only counted once, even if it is reachable twice (bind mounts).
+- ROMEO: the scan is limited to the user's scope (see UserScope):
+    - Above the user's spaces, only the directories leading to them are kept, no file is counted.
+    - Inside them, only files owned by the user are counted.
 */
 
 #pragma once
 
 #include "dir_tree.hpp"
+#include "user_scope.hpp"
 
 #include <atomic>
 #include <mutex>
@@ -27,7 +31,7 @@ Explanation:
 class Walker {
 public:
     // threads == 0 picks a count from the number of CPU cores
-    Walker(DirTree& _tree, const std::atomic<bool>& _stop, unsigned threads);
+    Walker(DirTree& _tree, const UserScope& _scope, const std::atomic<bool>& _stop, unsigned threads);
 
     // Scans the whole tree. Returns when every directory was visited, or once `stop` is set.
     void run();
@@ -54,6 +58,7 @@ private:
         std::vector<char> names;    // Sub-directory names of the current directory
         std::vector<Task> stolen;
         std::string path;
+        std::string child;          // Path of a sub-directory, to check it against the scope
     };
 
     /* Seen
@@ -92,6 +97,7 @@ private:
     static bool isSkippedFs(int fd);
 
     DirTree& tree;
+    const UserScope& scope;
     const std::atomic<bool>& stop;
 
     std::vector<Queue> queues;

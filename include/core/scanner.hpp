@@ -5,6 +5,7 @@ Explanation:
 - A directory is never counted twice, even if it can be reached through two paths.
 - Sizes can be read while the scan is running: they are atomics, so get() never waits for the scan.
 - Virtual filesystems (like /proc, /sys) and network shares (NFS, SMB) are ignored.
+- Only the user's scope is scanned and shown (see UserScope): other users' files are invisible.
 - Public interface includes:
     - scan() to start scanning the root path.
     - get(path) to retrieve the total size of a directory (thread-safe).
@@ -13,6 +14,7 @@ Explanation:
 #pragma once
 
 #include "dir_tree.hpp"
+#include "user_scope.hpp"
 
 #include <atomic>
 #include <filesystem>
@@ -36,7 +38,7 @@ public:
         double percent_change; // (new-old)/old * 100, 0 if old==0 and new==0
     };
 
-    Scanner(const fs::path& _path, const fs::path& _db_path) : path(_path), db_path(_db_path), tree(_path.string()) {};
+    Scanner(const fs::path& _path, const fs::path& _db_path, UserScope _scope) : path(_path), db_path(_db_path), scope(std::move(_scope)), tree(_path.string()) {};
 
     void scan();
     void stop();
@@ -50,10 +52,18 @@ public:
     uint64_t get(const fs::path& path);
     uint64_t getSnapped(const fs::path& path);
 
+    /* visible(entry)
+    - Whether the menu and the pie show this entry.
+    - Files: only the user's own, inside their spaces.
+    - Directories: only the ones the scan kept, that hold some of the user's bytes or belong to them.
+    */
+    bool visible(const fs::directory_entry& entry);
+
 private:
     fs::path path;
     fs::path db_path;
 
+    UserScope scope;
     DirTree tree;
 
     // Set when the scan has completed, or to make it stop early

@@ -119,6 +119,10 @@ void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entr
         if (entry.is_symlink(ec))
             continue;
 
+        // Same filter as the menu, so the selection matches the slices
+        if (!scanner->visible(entry))
+            continue;
+
         const bool is_dir = entry.is_directory(ec);
         uint64_t size = 0;
 

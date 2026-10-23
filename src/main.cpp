@@ -5,11 +5,13 @@
 #include "../include/core/scanner.hpp"
 #include "../include/ui/piechart.hpp"
 #include "../include/ui/menu.hpp"
+#include "../include/utils/format.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
 #include <ftxui/component/event.hpp>
 #include <filesystem>
+#include <string>
 
 #include <iostream>
 #include <unistd.h>
@@ -31,9 +33,24 @@ namespace fs = std::filesystem;
 int main(int argc, char* argv[]) {
     using namespace ftxui;
 
-    auto config = Config::get();
-    auto screen = ScreenInteractive::Fullscreen();
-    auto default_path = argc == 1 ? fs::current_path() : fs::weakly_canonical(argv[1]);
+    const bool summary = argc > 1 && std::string(argv[1]) == "--summary";
+    if (summary) {
+        argc--;
+        argv++;
+    }
+
+    if (argc > 1 && (std::string(argv[1]) == "-h" || std::string(argv[1]) == "--help")) {
+        std::cout << "Usage: bonsai-romeo [--summary] [path]\n"
+                     "  Shows only your own data: home, scratch and your /project/<group> folders.\n"
+                     "  --summary   scan, print the size of each of your spaces, and exit\n"
+                     "  BONSAI_ROOTS=dir1:dir2   override the detected spaces\n";
+        return 0;
+    }
+
+    // The user's spaces (home, scratch, projects), see UserScope
+    UserScope scope = UserScope::detect();
+
+    auto default_path = argc == 1 ? scope.commonAncestor() : fs::weakly_canonical(argv[1]);
 
     if(!fs::exists(default_path)) {
         std::cerr << "Error: Path does not exist: " << default_path << std::endl;
@@ -45,11 +62,44 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
+    // A path outside of the detected spaces becomes the only space (still only your own files)
+    if (scope.relation(default_path.native()) == UserScope::Relation::OUTSIDE) {
+        scope.roots = {default_path.string()};
+    }
+
     // Launch scanner
     auto home = fs::path(getpwuid(getuid())->pw_dir);
-    auto db_path = fs::weakly_canonical(home / ".cache/bonsai/db.txt");
+    auto db_path = fs::weakly_canonical(home / ".cache/bonsai-romeo/db.txt");
 
-    Scanner scanner = Scanner(default_path, db_path);
+    if (summary) {
+        Scanner scanner = Scanner(default_path, db_path, scope);
+        scanner.scan();
+
+        // Each space below the start path, or the start path itself if it is inside a space
+        std::vector<std::string> shown;
+        for (const auto& root : scope.roots) {
+            if (UserScope::isUnder(root, default_path.native()))
+                shown.push_back(root);
+        }
+        if (shown.empty())
+            shown.push_back(default_path.string());
+
+        uint64_t total = 0;
+        for (const auto& path : shown) {
+            const uint64_t size = scanner.get(path);
+            total += size;
+            std::cout << FormatUtils::toReadableShort(size) << "\t" << path << "\n";
+        }
+        std::cout << FormatUtils::toReadableShort(total) << "\ttotal\n";
+
+        scanner.snapshot();
+        return 0;
+    }
+
+    auto config = Config::get();
+    auto screen = ScreenInteractive::Fullscreen();
+
+    Scanner scanner = Scanner(default_path, db_path, scope);
     std::thread scanner_thread([&scanner]() {
         scanner.scan();
         scanner.snapshot();

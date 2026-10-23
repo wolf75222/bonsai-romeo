@@ -34,6 +34,10 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
 
             // Parse current path and get relevant data (size, is_dir, path, etc.)
             for (const auto& entry : fs::directory_iterator(current_path)) {
+                // Other users' files and folders aren't shown
+                if (!scanner->visible(entry))
+                    continue;
+
                 AppData::BonsaiMenuEntry item;
                 item.path = entry.path().string();
                 item.label = entry.path().filename().string();

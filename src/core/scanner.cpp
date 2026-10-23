@@ -80,9 +80,33 @@ uint64_t Scanner::getSnapped(const fs::path& path) {
     return 0;
 }
 
+bool Scanner::visible(const fs::directory_entry& entry) {
+    std::error_code ec;
+
+    if (entry.is_symlink(ec))
+        return false;
+
+    if (entry.is_directory(ec)) {
+        uint32_t id = tree.find(entry.path().native());
+        if (id == DirTree::NONE)
+            return false;
+
+        return tree.node(id).size.load(std::memory_order_relaxed) > 0 || scope.owns(entry.path());
+    }
+
+    return scope.relation(entry.path().native()) == UserScope::Relation::INSIDE
+        && scope.relation(entry.path().parent_path().native()) == UserScope::Relation::INSIDE
+        && scope.owns(entry.path());
+}
+
 Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     if (!this->done) {
         return ScannerRemoveResult{"Scanner hasn't completed yet.", true};
+    }
+
+    // Shared spaces (/project) hold other people's data: never touch it
+    if (!scope.owns(path) || scope.relation(path.native()) != UserScope::Relation::INSIDE) {
+        return ScannerRemoveResult{"This isn't yours: only your own files can be removed.", true};
     }
 
     uint64_t removed_size = 0;
@@ -129,7 +153,7 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
 }
 
 void Scanner::scan() {
-    Walker walker(tree, done, std::max(0, Config::get().SCANNER_THREADS));
+    Walker walker(tree, scope, done, std::max(0, Config::get().SCANNER_THREADS));
     walker.run();
 
     loadSnapshot();
