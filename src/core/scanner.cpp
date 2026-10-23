@@ -378,7 +378,13 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
 
         for (const auto& hit : findings.largest) {
             if (hit.disk < 100 * MIB) break;
-            items.push_back(CleanupItem{filePath(hit.dir, hit.name), "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
+
+            // Already listed as a core dump
+            const bool core = std::any_of(findings.cores.begin(), findings.cores.end(), [&hit](const Walker::FileHit& c) {
+                return c.dir == hit.dir && c.name == hit.name;
+            });
+            if (!core)
+                items.push_back(CleanupItem{filePath(hit.dir, hit.name), "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
         }
     }
 

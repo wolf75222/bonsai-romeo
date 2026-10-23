@@ -9,7 +9,8 @@ Explanation:
     - INSIDE   one of the spaces (or the space itself)
     - ANCESTOR of a space (/gpfs, /gpfs/home): only the way down to the spaces is kept
     - OUTSIDE  everything else, never scanned
-- Spaces can be overridden with BONSAI_ROOTS="path1:path2:..."
+- Spaces can be overridden with BONSAI_ROOTS="path1:path2:...", each optionally "path=shown as"
+  (e.g. "/tmp/demo/home=~"), which is how its paths are displayed
 */
 
 #pragma once
@@ -42,7 +43,8 @@ public:
         UserScope scope;
         scope.uid = getuid();
 
-        std::vector<fs::path> candidates;
+        // Path, and how it is shown ("": the usual rule below)
+        std::vector<std::pair<fs::path, std::string>> candidates;
 
         // Shown as "~" in paths, whatever the spaces come from
         std::string home;
@@ -56,7 +58,11 @@ public:
             while (start <= list.size()) {
                 size_t end = list.find(':', start);
                 if (end == std::string::npos) end = list.size();
-                if (end > start) candidates.push_back(list.substr(start, end - start));
+                if (end > start) {
+                    const std::string item = list.substr(start, end - start);
+                    const size_t eq = item.find('=');
+                    candidates.emplace_back(item.substr(0, eq), eq == std::string::npos ? "" : item.substr(eq + 1));
+                }
                 start = end + 1;
             }
         } else {
@@ -64,11 +70,11 @@ public:
             const std::string user = pw ? pw->pw_name : "";
 
             if (pw && pw->pw_dir)
-                candidates.push_back(pw->pw_dir);
+                candidates.emplace_back(pw->pw_dir, "");
 
             if (!user.empty()) {
-                candidates.push_back(fs::path("/scratch_p") / user);
-                candidates.push_back(fs::path("/scratch") / user);
+                candidates.emplace_back(fs::path("/scratch_p") / user, "");
+                candidates.emplace_back(fs::path("/scratch") / user, "");
             }
 
             // One project directory per group the user is in
@@ -78,11 +84,11 @@ public:
 
             for (int i = 0; i < count; i++) {
                 if (const group* gr = getgrgid(groups[i]); gr && gr->gr_name)
-                    candidates.push_back(fs::path("/project") / gr->gr_name);
+                    candidates.emplace_back(fs::path("/project") / gr->gr_name, "");
             }
         }
 
-        for (const auto& candidate : candidates) {
+        for (const auto& [candidate, shown] : candidates) {
             std::error_code ec;
             if (!fs::is_directory(candidate, ec)) continue;
 
@@ -90,7 +96,7 @@ public:
             if (ec) continue;
 
             scope.add(real);
-            scope.aliases.emplace_back(real, real == home ? "~" : candidate.string());
+            scope.aliases.emplace_back(real, !shown.empty() ? shown : (real == home ? "~" : candidate.string()));
         }
 
         return scope;
