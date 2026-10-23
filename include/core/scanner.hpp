@@ -69,6 +69,9 @@ public:
     // Formats a value of the current metric (1.20GiB / 1.5M)
     std::string format(uint64_t value, const std::string& spacer = "");
 
+    // Same, at most 5 characters (1.20G / 1.5M), for the sidebar
+    std::string formatShort(uint64_t value);
+
     /* visible(entry)
     - Whether the menu and the pie show this entry.
     - Files: only the user's own, inside their spaces.

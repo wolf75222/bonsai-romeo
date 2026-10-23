@@ -55,6 +55,7 @@ public:
     double CHART_CELL_RATIO = 0;
 
     bool ENABLE_FOLDER_SIZE_PERCENTAGES = true;
+    bool CHART_HIGHLIGHT_SUBTREE = false;
 
     /* Lazy initialization using a lambda:
     - Ensures config is loaded once at first access
@@ -320,6 +321,7 @@ private:
             {"CHART_MIN_SLICES",                    makeSetter(&Config::CHART_MIN_SLICES),                    true},
             {"CHART_DIM_FACTOR",                    makeSetter(&Config::CHART_DIM_FACTOR),                    true},
             {"CHART_CELL_RATIO",                    makeSetter(&Config::CHART_CELL_RATIO),                    true},
+            {"CHART_HIGHLIGHT_SUBTREE",             makeSetter(&Config::CHART_HIGHLIGHT_SUBTREE),             true},
             {"ENABLE_FOLDER_SIZE_PERCENTAGES",      makeSetter(&Config::ENABLE_FOLDER_SIZE_PERCENTAGES),      true},
             {"SCANNER_THREADS",                     makeSetter(&Config::SCANNER_THREADS),                     true},
             {"COLOR_MODE",                          makeSetter(&Config::COLOR_MODE),                          true},

@@ -32,6 +32,6 @@ namespace fs = std::filesystem;
 
 class BonsaiMenu {
 public:
-    static Component menu(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, int* selected, const fs::path& default_path, MenuOption options);
+    static Component menu(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, int* selected, const int* sidebar_width, const fs::path& default_path, MenuOption options);
     static void worker(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, const fs::path& default_path);
 };

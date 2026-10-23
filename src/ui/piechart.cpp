@@ -379,31 +379,47 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             std::array<int, 3> rgb = cfg.CHART_COLORS[i % cfg.CHART_COLORS.size()];
             Color text_color = Color::Default;
 
+            /* Shades of the children
+            - Each child is darker than the previous one: 1, 2, 3, 4 steps of CHART_DIM_FACTOR, then again from 1
+            - Counting on (5, 6, 7... steps) ended in black slices for folders with many sub-folders
+            */
             if(entry.depth != 0) {
                 std::string parent = entry.path.parent_path().string();
 
                 auto key = std::make_pair(entry.depth, parent);
-                color_indexes_per_parent[key] += 1;
+                const int index = color_indexes_per_parent[key]++;
 
-                rgb = darken(slice_colors[parent].rgb, cfg.CHART_DIM_FACTOR * color_indexes_per_parent[key]);
+                rgb = darken(slice_colors[parent].rgb, cfg.CHART_DIM_FACTOR * (index % 4 + 1));
                 text_color = slice_colors[parent].text;
             }
 
+            Color display_color = Color::RGB(rgb[0], rgb[1], rgb[2]);
+            Color display_text = text_color;
+
             /* In these two code blocks, false is the logic to check wether the slice is selected
             - selected can be -1 because we manually add a back entry for non default_dir paths
+            - Only the selected slice turns white, its sub-folders keep their colors: when the selection
+              was a big folder (82% of the disk), the whole pie went white and gray
+            - CHART_HIGHLIGHT_SUBTREE = true brings back upstream's look (whole subtree in grays)
             */
             if(selected != -1 && entry.depth == 0 && selected < entries.size() && entries[selected].depth == 0) {
                 // Same element of the list: no need to ask the filesystem if the two paths are the same file
                 bool is_selected = &entry == &entries[selected];
 
                 if (is_selected) {
-                    rgb = {255, 255, 255};
-                    text_color = Color::Black;
+                    display_color = Color::RGB(255, 255, 255);
+                    display_text = Color::Black;
+
+                    if (cfg.CHART_HIGHLIGHT_SUBTREE) {
+                        rgb = {255, 255, 255};
+                        text_color = Color::Black;
+                    }
                 }
             }
 
             slice_colors[entry.path.string()] = SliceColor{rgb, text_color};
-            Color color = Color::RGB(rgb[0], rgb[1], rgb[2]);
+            Color color = display_color;
+            text_color = display_text;
 
             AppData::BonsaiPieEntry slice;
             slice.depth = entry.depth;
@@ -484,6 +500,20 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
             int w = c.width();
             int h = c.height();
 
+            std::vector<AppData::BonsaiPieEntry> entries;
+            fs::path current_path;
+
+            {
+                std::lock_guard<std::mutex> lock(data->pie_mutex);
+                entries = *data->pie_entries;
+                current_path = *data->path;
+            }
+
+            uint64_t current_size = scanner->get(current_path);
+            std::string label = scanner->format(current_size, " ");
+            if (scanner->getMetric() == Scanner::Metric::INODES)
+                label += " files";
+
             /* Round pie on screen
             - The canvas has 2 dots per cell across and 4 down, so a dot is ratio / 2 times taller than wide
             - A circle `r` dots across is therefore `r * 2 / ratio` dots down
@@ -493,22 +523,14 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
 
             // Account for margin (15 dots) and center hole (15%)
             int max_radius = std::min(w / 2 - 15, static_cast<int>((h / 2 - 15) / y_scale));
-            int inner_hole_radius = max_radius * 0.15;
+            // The hole holds the total: a character is 2 dots wide, so half the label is `length` dots
+            int inner_hole_radius = std::min(std::max(static_cast<int>(max_radius * 0.15), static_cast<int>(FormatUtils::length(label)) + 2), max_radius / 2);
 
             Config cfg = Config::get();
             int max_layers = cfg.CHART_MAX_GENERATIONS;
 
             int available_radius = max_radius - inner_hole_radius;
             int layer_thickness = available_radius / max_layers;
-
-            std::vector<AppData::BonsaiPieEntry> entries;
-            fs::path current_path;
-
-            {
-                std::lock_guard<std::mutex> lock(data->pie_mutex);
-                entries = *data->pie_entries;
-                current_path = *data->path;
-            }
 
             // One marker per block of the canvas: the last slice that drew it (see drawAngledBlockEllipseRingOffset)
             std::vector<int> drawn_by(static_cast<size_t>(std::max(w, 0)) * (std::max(h, 0) / 2 + 1), -1);
@@ -535,11 +557,6 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
                     slice_id++
                 );
             }
-
-            uint64_t current_size = scanner->get(current_path);
-            std::string label = scanner->format(current_size, " ");
-            if (scanner->getMetric() == Scanner::Metric::INODES)
-                label += " files";
 
             // A character is 2 dots wide: half the label is `length` dots
             c.DrawText(w / 2 - static_cast<int>(FormatUtils::length(label)), h / 2, label);

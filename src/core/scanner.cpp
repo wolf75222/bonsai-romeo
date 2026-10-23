@@ -91,6 +91,10 @@ uint64_t Scanner::fileValue(const fs::directory_entry& entry) {
     return ec ? 0 : size;
 }
 
+std::string Scanner::formatShort(uint64_t value) {
+    return metric == Metric::INODES ? FormatUtils::toCount(value) : FormatUtils::toCompact(value);
+}
+
 std::string Scanner::format(uint64_t value, const std::string& spacer) {
     return metric == Metric::INODES ? FormatUtils::toCount(value, spacer) : FormatUtils::toReadable(value, spacer);
 }

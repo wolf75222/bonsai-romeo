@@ -76,6 +76,10 @@ On a Mac keyboard `âŒ«` is Backspace (go up), not delete: use `D` (or `fn` + `âŒ
 
 - Icons are plain ASCII (`+` folder, `>` selection, `<` back), so the columns line up in every
   terminal and font. Nerd Font icons can still be set in `~/.config/bonsai-romeo/bonsai.conf`.
+- Sizes in the sidebar are short (`282G`, `45.2G`, `911M`) so they always fit their column, and the
+  columns follow the sidebar when it is resized with the arrow keys.
+- The selected folder only turns white in the inner ring: its sub-folders keep their colors.
+  `CHART_HIGHLIGHT_SUBTREE = true` brings back upstream's look (the whole folder in grays).
 - The pie is round on screen: the size of a character cell is read from the terminal (SSH
   forwards it), since cells are rarely exactly twice as tall as wide (Warp: 9 x 20.4 px).
   If your terminal doesn't report it, set `CHART_CELL_RATIO` (cell height / width) in the config.

@@ -33,6 +33,27 @@ public:
         return toReadable(bytes, "");
     }
 
+    /* Size for narrow columns, never more than 5 characters: 512B, 64.0K, 911M, 2.61G, 28.1G
+    - "28.07GiB" didn't fit the sidebar column and was cut to "28.07Gi"
+    */
+    static std::string toCompact(uintmax_t bytes) {
+        static const char* units[] = {"B", "K", "M", "G", "T", "P"};
+
+        if (bytes < 1000)
+            return std::to_string(bytes) + "B";
+
+        double value = static_cast<double>(bytes);
+        int unit = 0;
+        while (value >= 999.5 && unit < 5) {
+            value /= 1024.0;
+            unit++;
+        }
+
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(value < 9.995 ? 2 : (value < 99.95 ? 1 : 0)) << value << units[unit];
+        return oss.str();
+    }
+
     // A count in a short format: 987, 12.3k, 1.50M
     static std::string toCount(uintmax_t count, const std::string& spacer = "") {
         std::ostringstream oss;

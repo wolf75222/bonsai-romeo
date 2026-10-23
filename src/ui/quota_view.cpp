@@ -2,6 +2,7 @@
 
 #include "../../include/utils/format.hpp"
 
+#include <algorithm>
 #include <iomanip>
 #include <sstream>
 
@@ -62,19 +63,19 @@ std::string graceText(const Quota::Limit& limit) {
     }
 }
 
-// Cell i of the gauge: filled, soft limit marker or empty
-int softCell(const Quota::Limit& limit) {
+// Cell of the gauge where the soft limit is (-1: none)
+int softCell(const Quota::Limit& limit, int bar_width) {
     if (limit.hard == 0 || limit.soft == 0) return -1;
-    return std::min(BAR_WIDTH - 1, static_cast<int>(static_cast<double>(limit.soft) / limit.hard * BAR_WIDTH));
+    return std::min(bar_width - 1, static_cast<int>(static_cast<double>(limit.soft) / limit.hard * bar_width));
 }
 
-Element gauge(const Quota::Limit& limit) {
-    const int filled = static_cast<int>(limit.ratio() * BAR_WIDTH + 0.5);
-    const int marker = softCell(limit);
+Element gauge(const Quota::Limit& limit, int bar_width) {
+    const int filled = static_cast<int>(limit.ratio() * bar_width + 0.5);
+    const int marker = softCell(limit, bar_width);
     const Color fill = stateColor(limit.state());
 
     Elements cells;
-    for (int i = 0; i < BAR_WIDTH; i++) {
+    for (int i = 0; i < bar_width; i++) {
         if (i == marker)
             cells.push_back(text("|") | bold | color(i < filled ? Color::White : Color::GrayLight) | bgcolor(i < filled ? fill : Color::GrayDark));
         else if (i < filled)
@@ -86,18 +87,64 @@ Element gauge(const Quota::Limit& limit) {
     return hbox(std::move(cells));
 }
 
-Element line(const std::string& label, const Quota::Limit& limit, bool bytes) {
+// What is said right of a gauge: what's left, or the grace period
+std::string rightText(const Quota::Limit& limit, bool bytes) {
+    const std::string grace = graceText(limit);
+    return grace.empty() ? left(limit, bytes) : grace;
+}
+
+/* Layout of the gauges, the same for every card so the bars and percentages line up
+- Wide enough: "Space  [gauge]  23%  24.26 GiB / 100.00 GiB  (hard 105.00 GiB)      75.74 GiB left"
+- Narrow terminal: the amounts go on a second line and the gauge shrinks, so nothing is cut
+*/
+struct Layout {
+    bool one_line = true;
+    int bar_width = BAR_WIDTH;
+};
+
+constexpr int LABEL_WIDTH = 8;
+constexpr int PERCENT_WIDTH = 6;
+
+Layout layout(const Quota::Report& report, int width) {
+    size_t amount = 0, right = 0;
+    for (const auto& row : report.rows) {
+        for (int i = 0; i < 2; i++) {
+            const Quota::Limit& limit = i == 0 ? row.space : row.inodes;
+            if (!limit.limited()) continue;
+            amount = std::max(amount, amounts(limit, i == 0).size());
+            right = std::max(right, rightText(limit, i == 0).size());
+        }
+    }
+
+    Layout l;
+    const int right_width = static_cast<int>(right) + 1;
+    l.one_line = width >= LABEL_WIDTH + BAR_WIDTH + PERCENT_WIDTH + static_cast<int>(amount) + 2 + right_width;
+    if (!l.one_line)
+        l.bar_width = std::clamp(width - LABEL_WIDTH - PERCENT_WIDTH - right_width - 2, 8, BAR_WIDTH);
+
+    return l;
+}
+
+Element line(const std::string& label, const Quota::Limit& limit, bool bytes, const Layout& l) {
     const Color c = stateColor(limit.state());
     const std::string grace = graceText(limit);
 
-    return hbox({
-        text(label) | size(WIDTH, EQUAL, 8),
-        gauge(limit),
-        text(" " + percent(limit)) | bold | color(c) | size(WIDTH, EQUAL, 6),
-        text(amounts(limit, bytes)),
+    Element first = hbox({
+        text(label) | size(WIDTH, EQUAL, LABEL_WIDTH),
+        gauge(limit, l.bar_width),
+        text(" " + percent(limit)) | bold | color(c) | size(WIDTH, EQUAL, PERCENT_WIDTH),
+        text(l.one_line ? amounts(limit, bytes) : ""),
         filler(),
-        text(grace.empty() ? left(limit, bytes) : grace) | color(grace.empty() ? Color::GrayLight : c) | bold,
+        text(rightText(limit, bytes)) | color(grace.empty() ? Color::GrayLight : c) | bold,
         text(" "),
+    });
+
+    if (l.one_line)
+        return first;
+
+    return vbox({
+        first,
+        hbox({text("") | size(WIDTH, EQUAL, LABEL_WIDTH), text(amounts(limit, bytes)) | color(Color::GrayLight)}),
     });
 }
 
@@ -146,7 +193,10 @@ Element BonsaiQuotaView::badge(const Quota::Report& report, bool ready) {
     return text(label) | bold | color(Color::Black) | bgcolor(stateColor(worst >= Quota::State::NOTICE ? worst : Quota::State::NOTICE));
 }
 
-Element BonsaiQuotaView::render(const Quota::Report& report, bool ready) {
+Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int width) {
+    // Inside a card: minus its two borders
+    const Layout gauges = layout(report, std::max(width - 2, 20));
+
     if (!ready)
         return vbox({text(" "), text("Reading GPFS quotas...") | center}) | flex;
 
@@ -175,8 +225,8 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready) {
 
         const Color c = stateColor(row.state());
         content.push_back(window(text(" " + title(row) + " ") | bold | color(c), vbox({
-            line("Space", row.space, true),
-            line("Files", row.inodes, false),
+            line("Space", row.space, true, gauges),
+            line("Files", row.inodes, false, gauges),
         })));
     }
 
@@ -213,7 +263,7 @@ std::string BonsaiQuotaView::toText(const Quota::Report& report, bool color) {
 
     auto bar = [&](const Quota::Limit& limit) {
         const int filled = static_cast<int>(limit.ratio() * BAR_WIDTH + 0.5);
-        const int marker = softCell(limit);
+        const int marker = softCell(limit, BAR_WIDTH);
         std::string s = color ? ansi(limit.state()) : "";
         s += "[";
         for (int i = 0; i < BAR_WIDTH; i++)

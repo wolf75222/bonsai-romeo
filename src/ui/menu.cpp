@@ -108,7 +108,7 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
     }
 }
 
-Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, int* selected, const fs::path& default_path, MenuOption options) {
+Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, int* selected, const int* sidebar_width, const fs::path& default_path, MenuOption options) {
 
     // Selected or unselected colors
     options.entries_option.animated_colors.foreground = AnimatedColorOption{
@@ -120,7 +120,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
     auto terminal_rows = std::make_shared<int>(Terminal::Size().dimy);
 
     // Plot the entry data on the menu in a nice way
-    options.entries_option.transform = [data, scanner, selected, terminal_rows](const EntryState& entry_state) {
+    options.entries_option.transform = [data, scanner, selected, sidebar_width, terminal_rows](const EntryState& entry_state) {
         /* Performance:
         - FTXUI's Menu builds the element of every entry on every frame, not only of the ones on screen
         - With thousands of entries, building and laying out all these rows is what makes scrolling lag
@@ -158,7 +158,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
                 const double abs_growth = std::abs(growth);
 
-                ss << (growth > 0 ? " " : " ");
+                ss << (growth > 0 ? "+" : "-");
 
                 if (abs_growth >= 1'000'000'000'000.0) {
                     ss << std::fixed << std::setprecision(1)
@@ -183,17 +183,28 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
             }
         }
 
-        auto row = hbox({
-            text(" " + icon_str + " " + FormatUtils::trimSuffix(item.label, Config::get().SIDEBAR_WIDTH * 0.4, "...")) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.5),
-            filler(),
+        /* Columns
+        - Sized from the live sidebar width (it changes with the arrow keys), not the one in the config:
+          the columns used to keep their first size and got cut when the sidebar was made narrower
+        - Fixed widths that always add up to the sidebar (minus its right margin), so every row lines up
+        */
+        const int width = std::max(*sidebar_width - 1, 12);
+        const int size_width = 6;                         // toCompact / toCount: 5 characters at most
+        const int growth_width = width >= 30 ? 8 : 0;     // " +12.3%"
+        const int name_width = width - size_width - growth_width;
 
-            text(item.label == ".." ? "" : growth_str) | color(growth > 0 ? Config::get().growthColor() : Config::get().shrinkColor()) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.2),
-            filler(),
+        auto row = hbox({
+            text(" " + icon_str + " " + FormatUtils::trimSuffix(item.label, std::max(name_width - 4, 1), "...")) | size(WIDTH, EQUAL, name_width),
 
             hbox(
                 filler(),
-                text(item.label == ".." ? "" : scanner->format(item.size)) | color(Color::GrayDark)
-            ) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.2)
+                text(item.label == ".." ? "" : growth_str) | color(growth > 0 ? Config::get().growthColor() : Config::get().shrinkColor())
+            ) | size(WIDTH, EQUAL, growth_width),
+
+            hbox(
+                filler(),
+                text(item.label == ".." ? "" : scanner->formatShort(item.size)) | color(Color::GrayDark)
+            ) | size(WIDTH, EQUAL, size_width)
         });
 
         return is_selected ? row | bgcolor(Color::White) | color(Color::Black)

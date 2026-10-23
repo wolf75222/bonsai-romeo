@@ -277,7 +277,7 @@ int main(int argc, char* argv[]) {
     */
     MenuOption option;
 
-    auto menu_component = BonsaiMenu::menu(&screen, data, &scanner, &selected, default_path, option);
+    auto menu_component = BonsaiMenu::menu(&screen, data, &scanner, &selected, &config.SIDEBAR_WIDTH, default_path, option);
     menu_component = CatchEvent(menu_component, [data, &scanner, &default_path, &show_confirm_modal](Event event) {
         // Mac keyboards have no SUPPR key (their delete key is Backspace, which goes up a folder): D works everywhere
         if (event == Event::Delete || event == Event::Character('d') || event == Event::Character('D')) {
@@ -352,7 +352,7 @@ int main(int argc, char* argv[]) {
     // Right side: the pie chart, or the quotas
     auto right = Renderer(pie_component, [&] {
         if (show_quota)
-            return BonsaiQuotaView::render(quotas.get(), quotas.ready());
+            return BonsaiQuotaView::render(quotas.get(), quotas.ready(), ftxui::Terminal::Size().dimx - config.SIDEBAR_WIDTH - 1);
 
         return pie_component->Render();
     });
@@ -400,7 +400,7 @@ int main(int argc, char* argv[]) {
         }
 
         if(event == Event::ArrowLeft && !show_confirm_modal && !show_error_modal) {
-            config.SIDEBAR_WIDTH -= 1;
+            config.SIDEBAR_WIDTH = std::max(20, config.SIDEBAR_WIDTH - 1);
             return true;
         }
 

@@ -17,7 +17,8 @@ using namespace ftxui;
 
 class BonsaiQuotaView {
 public:
-    static Element render(const Quota::Report& report, bool ready);
+    // width: columns available for the view (the right side of the window)
+    static Element render(const Quota::Report& report, bool ready, int width);
     static std::string toText(const Quota::Report& report, bool ansi_colors);
 
     // Short status for the sidebar header ("" when everything is fine)
