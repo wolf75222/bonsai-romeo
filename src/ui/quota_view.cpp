@@ -217,13 +217,20 @@ std::vector<std::string> strayHelp(const Quota::Report& report) {
 
 }
 
-Element BonsaiQuotaView::badge(const Quota::Report& report, bool ready) {
-    if (!ready || !report.error.empty()) return text("");
+std::string BonsaiQuotaView::badgeText(const Quota::Report& report, bool ready) {
+    if (!ready || !report.error.empty()) return "";
 
     const Quota::State worst = report.worst();
-    if (worst < Quota::State::NOTICE && report.stray_group.empty()) return text("");
+    if (worst < Quota::State::NOTICE && report.stray_group.empty()) return "";
 
-    const std::string label = worst >= Quota::State::GRACE ? " ! quota " : " quota ";
+    return worst >= Quota::State::GRACE ? " ! quota " : " quota ";
+}
+
+Element BonsaiQuotaView::badge(const Quota::Report& report, bool ready) {
+    const std::string label = badgeText(report, ready);
+    if (label.empty()) return text("");
+
+    const Quota::State worst = report.worst();
     return text(label) | bold | color(Color::Black) | bgcolor(stateColor(worst >= Quota::State::NOTICE ? worst : Quota::State::NOTICE));
 }
 

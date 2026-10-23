@@ -2,7 +2,8 @@
 - A window over the explorer (key C) listing what could be cleaned, biggest first (see Scanner::cleanup()):
   caches and rebuildable folders, folders untouched for months, core dumps, the largest files.
 - ENTER opens the selected entry in the explorer, where D deletes it. ESC or C closes the window.
-- TAB shows one kind at a time: all, caches and rebuildable folders, old data, folders of many files, files.
+- TAB shows one kind at a time: all, caches and rebuildable folders, old data (folders and files), folders of many files, files.
+- O changes what counts as old: 3 months, 6 months, 1 year, 2 years.
 - Paths are shown as the user knows them: ~ for home, /scratch_p/<user>, /project/<group>.
 */
 
@@ -27,6 +28,7 @@ public:
         bool partial = false;              // The scan is still running
         bool computing = false;            // The suggestions are being looked for (on their own thread)
         int64_t now = 0;
+        int old_days = 180;                // Unchanged for this long: old (key O)
     };
 
     // Fills `state` with suggestions computed elsewhere (Scanner::cleanup() walks the whole tree): UI thread only
@@ -39,7 +41,9 @@ public:
     static std::string toText(const std::vector<Scanner::CleanupItem>& items, const UserScope& scope, size_t max_items);
     static std::string toJson(const std::vector<Scanner::CleanupItem>& items, const UserScope& scope);
 
+    // on_age: O changed state->old_days, the suggestions are looked for again
     static ftxui::Component window(std::shared_ptr<State> state, const UserScope* scope,
                                    std::function<void(const Scanner::CleanupItem&)> on_open,
-                                   std::function<void()> on_close);
+                                   std::function<void()> on_close,
+                                   std::function<void()> on_age);
 };

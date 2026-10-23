@@ -129,13 +129,16 @@ public:
     /* cleanup()
     - What could be cleaned in the user's spaces, biggest first:
         - caches and rebuildable folders (pip / conda / spack / apptainer caches, __pycache__, build folders...)
-        - big folders where nothing changed for CLEANUP_OLD_DAYS days
+        - folders where nothing changed for `old_days` days (CLEANUP_OLD_DAYS when 0), and the biggest old files
         - folders holding many files (the file quota), each where its files are, not every folder above it
         - core dumps and the largest files
     - Sorted by size on disk, or by files when the explorer shows files.
     - Works during the scan too, on what was found so far.
     */
-    std::vector<CleanupItem> cleanup();
+    std::vector<CleanupItem> cleanup(int old_days = 0);
+
+    // Old files are kept from this many days on, whatever the threshold chosen later (see cleanup())
+    static constexpr int SHORTEST_OLD_DAYS = 90;
 
     /* rescan(path)
     - Scans `path` again, on the calling thread: after changes made elsewhere, or for a folder made after the scan.
@@ -283,6 +286,7 @@ private:
     // Largest files and core dumps seen by the walkers
     std::mutex findings_mutex;
     std::vector<FoundFile> largest;
+    std::vector<FoundFile> old_files;   // The biggest files unchanged for SHORTEST_OLD_DAYS days or more
     std::vector<FoundFile> cores;
 
     // Only one thread writes the snapshot file at a time

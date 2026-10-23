@@ -65,7 +65,8 @@ constexpr unsigned MAX_THREADS = 256;
 
 }
 
-Walker::Walker(DirTree& _tree, const UserScope& _scope, const std::atomic<bool>& _stop, unsigned threads) : tree(_tree), scope(_scope), stop(_stop), seen(SEEN_BUCKETS) {
+Walker::Walker(DirTree& _tree, const UserScope& _scope, const std::atomic<bool>& _stop, unsigned threads, int64_t _old_before)
+    : tree(_tree), scope(_scope), stop(_stop), old_before(_old_before), seen(SEEN_BUCKETS) {
     if (threads == 0)
         threads = std::min(std::max(1u, std::thread::hardware_concurrency()) * AUTO_THREADS_PER_CORE, MAX_AUTO_THREADS);
 
@@ -189,6 +190,7 @@ void Walker::work(unsigned self) {
     std::lock_guard<std::mutex> lock(findings_mutex);
     merged.cores.insert(merged.cores.end(), scratch.cores.begin(), scratch.cores.end());
     merged.largest.insert(merged.largest.end(), scratch.largest.begin(), scratch.largest.end());
+    merged.old.insert(merged.old.end(), scratch.old.begin(), scratch.old.end());
 }
 
 Walker::Findings Walker::findings() {
@@ -200,11 +202,15 @@ Walker::Findings Walker::findings() {
     if (out.largest.size() > LARGEST_FILES)
         out.largest.resize(LARGEST_FILES);
 
+    std::sort(out.old.begin(), out.old.end(), bigger);
+    if (out.old.size() > OLD_FILES)
+        out.old.resize(OLD_FILES);
+
     std::sort(out.cores.begin(), out.cores.end(), bigger);
     return out;
 }
 
-void Walker::remember(Scratch& scratch, uint32_t dir, const char* name, uint64_t disk, uint64_t bytes, int64_t mtime) {
+void Walker::remember(Scratch& scratch, uint32_t dir, const char* name, uint64_t disk, uint64_t bytes, int64_t mtime) const {
     // Core dumps: "core" or "core.<pid>"
     if (std::strncmp(name, "core", 4) == 0 && (name[4] == '\0' || (name[4] == '.' && name[5] != '\0' && std::strspn(name + 5, "0123456789") == std::strlen(name + 5))))
         scratch.cores.push_back(FileHit{disk, bytes, dir, name, mtime});
@@ -219,6 +225,19 @@ void Walker::remember(Scratch& scratch, uint32_t dir, const char* name, uint64_t
         std::pop_heap(scratch.largest.begin(), scratch.largest.end(), bigger);
         scratch.largest.back() = FileHit{disk, bytes, dir, name, mtime};
         std::push_heap(scratch.largest.begin(), scratch.largest.end(), bigger);
+    }
+
+    // Unchanged for long: the biggest of these are kept too, the cleanup view lists them as old files
+    if (old_before <= 0 || mtime <= 0 || mtime >= old_before)
+        return;
+
+    if (scratch.old.size() < OLD_FILES) {
+        scratch.old.push_back(FileHit{disk, bytes, dir, name, mtime});
+        std::push_heap(scratch.old.begin(), scratch.old.end(), bigger);
+    } else if (disk > scratch.old.front().disk) {
+        std::pop_heap(scratch.old.begin(), scratch.old.end(), bigger);
+        scratch.old.back() = FileHit{disk, bytes, dir, name, mtime};
+        std::push_heap(scratch.old.begin(), scratch.old.end(), bigger);
     }
 }
 

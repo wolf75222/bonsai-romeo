@@ -24,7 +24,7 @@ constexpr int FILTER_COUNT = 5;
 bool keeps(int filter, const Scanner::CleanupItem& item) {
     switch (filter) {
         case 1: return !item.is_file && item.kind != "old data" && item.kind != "many files";
-        case 2: return item.kind == "old data";
+        case 2: return item.kind == "old data" || item.kind == "old file";
         case 3: return item.kind == "many files";
         case 4: return item.is_file;
         default: return true;
@@ -32,11 +32,24 @@ bool keeps(int filter, const Scanner::CleanupItem& item) {
 }
 
 Color kindColor(const std::string& kind) {
-    if (kind == "old data")   return Color::RGB(255, 140, 0);
+    if (kind == "old data" || kind == "old file") return Color::RGB(255, 140, 0);
     if (kind == "many files") return Color::RGB(186, 85, 211);
     if (kind == "core dump")  return Color::RGB(255, 70, 70);
     if (kind == "large file") return Color::RGB(30, 144, 255);
     return Color::RGB(60, 179, 113);
+}
+
+// The thresholds O goes through
+const int AGES[] = {90, 180, 365, 730};
+
+std::string ageName(int days) {
+    switch (days) {
+        case 90:  return "3 months";
+        case 180: return "6 months";
+        case 365: return "1 year";
+        case 730: return "2 years";
+        default:  return std::to_string(days) + " days";
+    }
 }
 
 // "12 entries, 3.40 GiB on disk, 120k files"
@@ -116,7 +129,8 @@ std::string BonsaiCleanup::toJson(const std::vector<Scanner::CleanupItem>& items
 
 Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* scope,
                                 std::function<void(const Scanner::CleanupItem&)> on_open,
-                                std::function<void()> on_close) {
+                                std::function<void()> on_close,
+                                std::function<void()> on_age) {
     MenuOption option;
 
     // Columns: size on disk, files, last change, kind, path
@@ -160,6 +174,7 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
             hbox({
                 text(" Cleanup suggestions ") | bold,
                 text("[" + std::string(FILTERS[state->filter]) + "]  ") | color(Color::GrayLight),
+                text("old: " + ageName(state->old_days) + "  ") | color(Color::GrayDark),
                 filler(),
                 text(summary(state->items) + " ") | color(Color::GrayLight),
             }),
@@ -175,11 +190,11 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
             list,
             separator(),
             paragraph(" " + hint),
-            text(" ENTER open in the explorer (then D to delete)   TAB kind   ESC close") | color(Color::GrayDark),
+            text(" ENTER open (then D delete, T pack)   TAB kind   O age   ESC close") | color(Color::GrayDark),
         }) | border | size(WIDTH, LESS_THAN, 120);
     });
 
-    return keepFocus(CatchEvent(view, [state, on_close](Event event) {
+    return keepFocus(CatchEvent(view, [state, on_close, on_age](Event event) {
         if (event == Event::Escape || event == Event::Character('c') || event == Event::Character('C')) {
             on_close();
             return true;
@@ -188,6 +203,14 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
         if (event == Event::Tab) {
             state->filter = (state->filter + 1) % FILTER_COUNT;
             apply(*state);
+            return true;
+        }
+
+        // What counts as old: the next threshold, looked for again
+        if (event == Event::Character('o') || event == Event::Character('O')) {
+            const auto* at = std::find(std::begin(AGES), std::end(AGES), state->old_days);
+            state->old_days = at == std::end(AGES) || at + 1 == std::end(AGES) ? AGES[0] : *(at + 1);
+            on_age();
             return true;
         }
 

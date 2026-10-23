@@ -153,7 +153,7 @@ int main(int argc, char* argv[]) {
                          "  Shows only your own data: home, scratch and your /project/<group> folders.\n"
                          "  --summary   scan, print size, disk usage and file count of each of your spaces, and exit\n"
                          "  --quota     print your GPFS quotas (space and files) with gauges, and exit\n"
-                         "  --cleanup   scan, print what could be cleaned (caches, builds, old data, many files, large files), and exit\n"
+                         "  --cleanup   scan, print what could be cleaned (caches, builds, old folders and files, many files, large files), and exit\n"
                          "  --json      with one of the above: the same as JSON, for scripts\n"
                          "  BONSAI_ROOTS=dir1:dir2   override the detected spaces\n"
                          "  BONSAI_THREADS=n         scan threads (default: automatic, up to 32)\n"
@@ -981,11 +981,22 @@ int main(int argc, char* argv[]) {
         const Scanner::Metric metric = scanner.getMetric();
         const AppData::Sort sort = data->sort.load();
 
-        // Where the explorer is, the way the user knows it (what runs, and what happened, go at the bottom)
+        /* Header: where the explorer is, then only what differs from the start (what F and S show) and the quota badge
+        - What runs and what happened go at the bottom, the keys are in ? (one line of the main ones)
+        */
         const std::string here = scanner.isSpacesView(*data->path) ? "your spaces" : scope.display(*data->path);
-        const size_t here_width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
-        const char* metric_label = metric == Scanner::Metric::INODES ? " [files" : (metric == Scanner::Metric::DISK ? " [disk" : " [size");
-        const char* sort_label = sort == AppData::Sort::NAME ? ", by name]" : sort == AppData::Sort::AGE ? ", oldest first]" : "]";
+        const size_t width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
+
+        std::string shown;
+        if (metric == Scanner::Metric::DISK) shown += "disk ";
+        if (metric == Scanner::Metric::INODES) shown += "files ";
+        if (sort == AppData::Sort::NAME) shown += "by name ";
+        if (sort == AppData::Sort::AGE) shown += "oldest first ";
+
+        const Quota::Report report = quotas.get();
+        const bool ready = quotas.ready();
+        const size_t taken = shown.size() + BonsaiQuotaView::badgeText(report, ready).size() + 2;
+        const size_t room = width > taken + 8 ? width - taken : 8;
 
         Elements bottom;
 
@@ -996,35 +1007,32 @@ int main(int argc, char* argv[]) {
                 if (const std::string done = BonsaiProgress::percent(*progress_job.progress); !done.empty())
                     busy += "  " + done;
             }
-            bottom.push_back(text(" " + FormatUtils::trimMiddle(busy + "  (P)", here_width)) | color(Color::GrayLight));
+            bottom.push_back(text(" " + FormatUtils::trimMiddle(busy + "  (P)", width)) | color(Color::GrayLight));
         } else if (!notice.empty() && std::chrono::steady_clock::now() < notice_until) {
-            bottom.push_back(text(" " + FormatUtils::trimMiddle(notice, here_width)) | color(Color::RGB(60, 179, 113)));
+            bottom.push_back(text(" " + FormatUtils::trimMiddle(notice, width)) | color(Color::RGB(60, 179, 113)));
         }
 
         // Marked entries (SPACE): what D would delete
         if (!marks_line.empty())
-            bottom.push_back(text(marks_line) | color(Color::RGB(255, 215, 0)));
+            bottom.push_back(text(FormatUtils::trimSuffix(marks_line, width + 1, "...")) | color(Color::RGB(255, 215, 0)));
 
         // Folders that couldn't be read: the sizes above them may be low
         if (const uint32_t errors = scanner.readErrorCount(); errors > 0) {
-            bottom.push_back(text(" ! " + std::to_string(errors) + (errors == 1 ? " folder" : " folders") + " couldn't be read (! to see)")
+            bottom.push_back(text(" ! " + std::to_string(errors) + (errors == 1 ? " unreadable folder (!)" : " unreadable folders (!)"))
                              | color(Color::RGB(255, 140, 0)));
         }
 
         bottom.push_back(separator());
-        bottom.push_back(text(" F size  S order  A age  / find") | color(Color::GrayDark));
-        bottom.push_back(text(" C clean  U quota  W grew  ? keys") | color(Color::GrayDark));
-        bottom.push_back(text(" SPACE mark  D delete  T pack  Q quit") | color(Color::GrayDark));
+        bottom.push_back(text(FormatUtils::trimSuffix(" ? keys  / find  C clean  U quota", width + 1, "")) | color(Color::GrayDark));
 
         Elements rows = {
-            text(" "),
             hbox({
-                text("Explorer") | bold,
-                text(std::string(metric_label) + sort_label) | color(Color::GrayDark),
+                text(" " + FormatUtils::trimMiddle(here, room)) | bold,
+                filler(),
+                text(shown) | color(Color::GrayDark),
+                BonsaiQuotaView::badge(report, ready),
                 text(" "),
-                BonsaiQuotaView::badge(quotas.get(), quotas.ready()),
-            }) | center,
-            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(Color::GrayLight),
+            }),
             separator(),
             hbox({
                 menu_component->Render() | frame | flex,
@@ -1095,16 +1103,48 @@ int main(int argc, char* argv[]) {
         show_quota = false;
     };
 
-    // Cleanup suggestions (key C)
+    /* Cleanup suggestions (key C)
+    - Looked for on their own thread (the walk covers the whole tree, ~700k folders): the window opens at once
+    - Asked again while looking (C, ESC, C, or O for another age): looked for again with the latest age once done
+    */
     auto cleanup_state = std::make_shared<BonsaiCleanup::State>();
+    cleanup_state->old_days = std::max(1, config.CLEANUP_OLD_DAYS);
     std::thread cleanup_thread;
     std::atomic<bool> cleanup_running{false};
+
+    std::function<void()> lookForCleanup = [&] {
+        cleanup_state->computing = true;
+        cleanup_state->all.clear();
+        BonsaiCleanup::apply(*cleanup_state);
+
+        if (cleanup_running)
+            return;
+        if (cleanup_thread.joinable())
+            cleanup_thread.join();
+
+        cleanup_running = true;
+        cleanup_thread = std::thread([&, days = cleanup_state->old_days] {
+            auto items = std::make_shared<std::vector<Scanner::CleanupItem>>(scanner.cleanup(days));
+            const bool partial = !scanner.isDone();
+            cleanup_running = false;
+
+            screen.Post([&, items, partial, days] {
+                if (days != cleanup_state->old_days)
+                    lookForCleanup();
+                else
+                    BonsaiCleanup::set(*cleanup_state, std::move(*items), partial);
+            });
+            screen.PostEvent(Event::Custom);
+        });
+    };
+
     auto cleanup_component = BonsaiCleanup::window(cleanup_state, &scanner.getScope(),
         [&](const Scanner::CleanupItem& item) {
             open_in_explorer(item.path);
             show_cleanup = false;
         },
-        [&] { show_cleanup = false; });
+        [&] { show_cleanup = false; },
+        [&] { lookForCleanup(); });
 
     // What grew since the previous scan (key W), worked out on its own thread too
     auto growth_state = std::make_shared<BonsaiGrowth::State>();
@@ -1247,31 +1287,9 @@ int main(int argc, char* argv[]) {
             return true;
         }
 
-        // Suggestions walk the whole tree (~700k folders): on their own thread, the window opens at once
         if ((event == Event::Character('c') || event == Event::Character('C')) && !modal_open()) {
             show_cleanup = true;
-
-            // Still looking (C, ESC, C): its list shows when it is ready, instead of the UI waiting for it here
-            if (cleanup_running)
-                return true;
-            if (cleanup_thread.joinable())
-                cleanup_thread.join();
-
-            cleanup_state->computing = true;
-            cleanup_state->all.clear();
-            BonsaiCleanup::apply(*cleanup_state);
-
-            cleanup_running = true;
-            cleanup_thread = std::thread([&] {
-                auto items = std::make_shared<std::vector<Scanner::CleanupItem>>(scanner.cleanup());
-                const bool partial = !scanner.isDone();
-
-                screen.Post([&, items, partial] {
-                    BonsaiCleanup::set(*cleanup_state, std::move(*items), partial);
-                });
-                screen.PostEvent(Event::Custom);
-                cleanup_running = false;
-            });
+            lookForCleanup();
             return true;
         }
 

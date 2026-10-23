@@ -30,11 +30,11 @@ Finds folders by name in all your spaces as you type, biggest first. Every word 
 Lists what could be cleaned, biggest first, with what each entry is and how to clean it:
 
 - caches and folders that get rebuilt (pip, huggingface, conda, spack and apptainer caches, `__pycache__`, `node_modules`, build folders, virtual envs...),
-- folders of 1 GiB or more where nothing changed for 6 months (`CLEANUP_OLD_DAYS`),
+- old data: folders of 100 MiB or 10,000 files or more where nothing changed for 6 months, and the biggest files unchanged as long (`O` switches between 3 months, 6 months, 1 year and 2 years; the default is `CLEANUP_OLD_DAYS`),
 - folders of 10,000 files or more, for the file quota: each where its files are, not every folder above it,
 - core dumps and your largest files.
 
-`TAB` shows one kind at a time. `ENTER` opens the entry in the explorer, where `D` deletes it and `T` packs it. The list is sorted by size on disk, or by files when the explorer shows files (`F`). The same list prints with `bonsai-romeo --cleanup`.
+`TAB` shows one kind at a time (all, caches and builds, old data, many files, files). `ENTER` opens the entry in the explorer, where `D` deletes it and `T` packs it. The list is sorted by size on disk, or by files when the explorer shows files (`F`). The same list prints with `bonsai-romeo --cleanup`.
 
 ## What grew: `W`
 

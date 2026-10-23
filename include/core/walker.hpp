@@ -13,7 +13,8 @@ Explanation:
     - /proc, /sys and network shares (NFS, SMB) are not entered.
     - A directory is only counted once, even if it is reachable twice (bind mounts).
     - A file with several hard links is only counted once, like the GPFS quotas do.
-- Along the way it keeps the largest files and the core dumps it sees, for the cleanup view.
+- Along the way it keeps the largest files, the largest of the ones unchanged for long, and the core dumps it
+  sees, for the cleanup view.
 - ROMEO: the scan is limited to the user's scope (see UserScope):
     - Above the user's spaces, only the directories leading to them are kept, no file is counted.
     - Inside them, only files owned by the user are counted.
@@ -33,8 +34,8 @@ Explanation:
 
 class Walker {
 public:
-    // threads == 0 picks a count from the number of CPU cores
-    Walker(DirTree& _tree, const UserScope& _scope, const std::atomic<bool>& _stop, unsigned threads);
+    // threads == 0 picks a count from the number of CPU cores; files last changed before `old_before` count as old (0: none)
+    Walker(DirTree& _tree, const UserScope& _scope, const std::atomic<bool>& _stop, unsigned threads, int64_t old_before = 0);
 
     // Scans the whole tree. Returns when every directory was visited, or once `stop` is set.
     void run();
@@ -50,10 +51,12 @@ public:
 
     struct Findings {
         std::vector<FileHit> largest;  // The LARGEST_FILES biggest files of the user, biggest first
+        std::vector<FileHit> old;      // The OLD_FILES biggest of the ones unchanged since old_before, biggest first
         std::vector<FileHit> cores;    // Core dumps ("core", "core.1234")
     };
 
     static constexpr size_t LARGEST_FILES = 50;
+    static constexpr size_t OLD_FILES = 500;
 
     // What all the threads found. Call after run().
     Findings findings();
@@ -83,6 +86,7 @@ private:
         std::string child;          // Path of a sub-directory, to check it against the scope
 
         std::vector<FileHit> largest;  // Min-heap on `disk`, at most LARGEST_FILES
+        std::vector<FileHit> old;      // Same, at most OLD_FILES
         std::vector<FileHit> cores;
     };
 
@@ -114,7 +118,7 @@ private:
 
     void work(unsigned self);
     void visit(const Task& task, unsigned self, Scratch& scratch);
-    static void remember(Scratch& scratch, uint32_t dir, const char* name, uint64_t disk, uint64_t bytes, int64_t mtime);
+    void remember(Scratch& scratch, uint32_t dir, const char* name, uint64_t disk, uint64_t bytes, int64_t mtime) const;
 
     bool pop(unsigned self, Task& task);
     bool steal(unsigned self, Task& task, Scratch& scratch);
@@ -125,6 +129,7 @@ private:
     DirTree& tree;
     const UserScope& scope;
     const std::atomic<bool>& stop;
+    const int64_t old_before;
 
     std::vector<Queue> queues;
     std::vector<SeenBucket> seen;

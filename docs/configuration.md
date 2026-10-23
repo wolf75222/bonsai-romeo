@@ -9,7 +9,7 @@ The config file is `~/.config/bonsai-romeo/bonsai.conf`, created on the first ru
 | `CHART_CELL_RATIO` | `0` | height / width of a character cell, keeps the chart round; `0` asks the terminal |
 | `CHART_HIGHLIGHT_SUBTREE` | `false` | `true`: the selected folder turns gray, as in bonsai |
 | `CHART_MAX_GENERATIONS` | `4` | number of rings in the chart |
-| `CLEANUP_OLD_DAYS` | `180` | days without changes after which a big folder counts as old data |
+| `CLEANUP_OLD_DAYS` | `180` | days without changes after which a folder or a file counts as old data (`O` in the cleanup view changes it for the session) |
 | `ENABLE_FOLDER_SIZE_PERCENTAGES` | `true` | show the change since the previous scan |
 | `SIDEBAR_WIDTH` | `40` | also changed with `←` / `→`, and saved |
 | `SIDEBAR_*_ICON` | ASCII | Nerd Font icons work too, if your terminal draws them one column wide |

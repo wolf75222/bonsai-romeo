@@ -41,6 +41,7 @@ public:
     static std::string toText(const Quota::Report& report, bool ansi_colors);
     static std::string toJson(const Quota::Report& report);
 
-    // Short status for the sidebar header ("" when everything is fine)
+    // Short status for the sidebar header ("" when everything is fine), and its text
     static Element badge(const Quota::Report& report, bool ready);
+    static std::string badgeText(const Quota::Report& report, bool ready);
 };

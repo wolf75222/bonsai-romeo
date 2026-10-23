@@ -39,6 +39,12 @@ constexpr uint64_t MANY_FILES = 10000;
 // A sub-folder holding this share of a folder's files (or growth) is where they are, not the folder
 constexpr double MOSTLY = 0.8;
 
+// Files last changed before this count as old for the walkers: the shortest threshold the cleanup view offers
+int64_t oldCutoff() {
+    const int days = std::min(Scanner::SHORTEST_OLD_DAYS, std::max(1, Config::get().CLEANUP_OLD_DAYS));
+    return static_cast<int64_t>(std::time(nullptr)) - static_cast<int64_t>(days) * 86400;
+}
+
 // Scan threads: the config, or BONSAI_THREADS (e.g. inside a job); 0 picks them automatically
 unsigned scanThreads() {
     int threads = Config::get().SCANNER_THREADS;
@@ -409,11 +415,12 @@ std::string Scanner::filePath(const DirTree& t, uint32_t dir, const std::string&
     return out + name;
 }
 
-std::vector<Scanner::CleanupItem> Scanner::cleanup() {
+std::vector<Scanner::CleanupItem> Scanner::cleanup(int old_days) {
     std::vector<CleanupItem> items;
 
     const int64_t now = std::time(nullptr);
-    const int64_t old_after = static_cast<int64_t>(std::max(1, Config::get().CLEANUP_OLD_DAYS)) * 86400;
+    const int days = old_days > 0 ? old_days : std::max(1, Config::get().CLEANUP_OLD_DAYS);
+    const int64_t old_after = static_cast<int64_t>(days) * 86400;
 
     // Folders: the first match on the way down wins, nothing below it is suggested again
     walkAll([&](const std::string& path, const DirTree::Node& node, const DirTree&) {
@@ -435,7 +442,7 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
         }
 
         // Only once scanned completely: a recent file not reached yet would make it look untouched
-        if (disk >= GIB && newest > 0 && now - newest > old_after && node.complete.load(std::memory_order_acquire)) {
+        if ((disk >= 100 * MIB || inodes >= MANY_FILES) && newest > 0 && now - newest > old_after && node.complete.load(std::memory_order_acquire)) {
             items.push_back(CleanupItem{path, "old data", "Nothing changed in it for " + FormatUtils::toAge(now - newest)
                                         + ": archive it elsewhere (no backups on ROMEO) or delete it", disk, inodes, newest, false});
             return false;
@@ -522,13 +529,24 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
                 items.push_back(CleanupItem{hit.path, "core dump", "Memory dump of a crashed program: safe to delete", hit.disk, 1, hit.mtime, true});
         }
 
+        auto core = [this](const FoundFile& hit) {
+            return std::any_of(cores.begin(), cores.end(), [&hit](const FoundFile& c) { return c.path == hit.path; });
+        };
+        auto old = [&](const FoundFile& hit) { return hit.mtime > 0 && now - hit.mtime > old_after; };
+
+        // An old one is listed as such, below
         for (const auto& hit : largest) {
             if (hit.disk < 100 * MIB) break;
-
-            // Already listed as a core dump
-            const bool core = std::any_of(cores.begin(), cores.end(), [&hit](const FoundFile& c) { return c.path == hit.path; });
-            if (!core && !gone(hit.path))
+            if (!core(hit) && !old(hit) && !gone(hit.path))
                 items.push_back(CleanupItem{hit.path, "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
+        }
+
+        // The biggest files unchanged for long (biggest first: below 1 MiB, one at a time isn't worth it)
+        for (const auto& hit : old_files) {
+            if (hit.disk < MIB) break;
+            if (old(hit) && !core(hit) && !gone(hit.path))
+                items.push_back(CleanupItem{hit.path, "old file", "Unchanged for " + FormatUtils::toAge(now - hit.mtime)
+                                            + ": archive it elsewhere (no backups on ROMEO) or delete it", hit.disk, 1, hit.mtime, true});
         }
     }
 
@@ -556,8 +574,8 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
             kept.push_back(std::move(items[i]));
     }
 
-    if (kept.size() > 300)
-        kept.resize(300);
+    if (kept.size() > 500)
+        kept.resize(500);
 
     return kept;
 }
@@ -964,7 +982,7 @@ Scanner::RescanResult Scanner::rescan(const std::string& target, Progress* progr
         }
     });
 
-    Walker walker(*ov->tree, scope, stop, scanThreads());
+    Walker walker(*ov->tree, scope, stop, scanThreads(), oldCutoff());
     walker.run();
     walking = false;
     watch.join();
@@ -1006,16 +1024,23 @@ Scanner::RescanResult Scanner::rescan(const std::string& target, Progress* progr
 
         auto inside = [&target](const FoundFile& f) { return UserScope::isUnder(f.path, target); };
         largest.erase(std::remove_if(largest.begin(), largest.end(), inside), largest.end());
+        old_files.erase(std::remove_if(old_files.begin(), old_files.end(), inside), old_files.end());
         cores.erase(std::remove_if(cores.begin(), cores.end(), inside), cores.end());
 
         for (const auto& hit : found.largest)
             largest.push_back(FoundFile{filePath(*ov->tree, hit.dir, hit.name), hit.disk, hit.bytes, hit.mtime});
+        for (const auto& hit : found.old)
+            old_files.push_back(FoundFile{filePath(*ov->tree, hit.dir, hit.name), hit.disk, hit.bytes, hit.mtime});
         for (const auto& hit : found.cores)
             cores.push_back(FoundFile{filePath(*ov->tree, hit.dir, hit.name), hit.disk, hit.bytes, hit.mtime});
 
-        std::sort(largest.begin(), largest.end(), [](const FoundFile& a, const FoundFile& b) { return a.disk > b.disk; });
+        auto bigger = [](const FoundFile& a, const FoundFile& b) { return a.disk > b.disk; };
+        std::sort(largest.begin(), largest.end(), bigger);
         if (largest.size() > Walker::LARGEST_FILES)
             largest.resize(Walker::LARGEST_FILES);
+        std::sort(old_files.begin(), old_files.end(), bigger);
+        if (old_files.size() > Walker::OLD_FILES)
+            old_files.resize(Walker::OLD_FILES);
     }
 
     this->snapshot();
@@ -1135,7 +1160,7 @@ void Scanner::scan() {
     // The previous scan is read while this one starts: it only delays what is shown, never the scan
     std::thread loader(&Scanner::loadCache, this);
 
-    Walker walker(tree, scope, done, scanThreads());
+    Walker walker(tree, scope, done, scanThreads(), oldCutoff());
     walker.run();
 
     {
@@ -1150,12 +1175,18 @@ void Scanner::scan() {
         };
         for (const auto& hit : found.largest)
             add(largest, hit);
+        for (const auto& hit : found.old)
+            add(old_files, hit);
         for (const auto& hit : found.cores)
             add(cores, hit);
 
-        std::sort(largest.begin(), largest.end(), [](const FoundFile& a, const FoundFile& b) { return a.disk > b.disk; });
+        auto bigger = [](const FoundFile& a, const FoundFile& b) { return a.disk > b.disk; };
+        std::sort(largest.begin(), largest.end(), bigger);
         if (largest.size() > Walker::LARGEST_FILES)
             largest.resize(Walker::LARGEST_FILES);
+        std::sort(old_files.begin(), old_files.end(), bigger);
+        if (old_files.size() > Walker::OLD_FILES)
+            old_files.resize(Walker::OLD_FILES);
     }
 
     loader.join();

@@ -41,7 +41,7 @@ const std::vector<Group> GROUPS = {
     }},
     {"Windows", {
         {"/", "search folders by name"},
-        {"C", "cleanup suggestions"},
+        {"C", "cleanup suggestions (TAB kind, O what counts as old)"},
         {"U", "quotas; 1 to 9 there opens that space in the explorer"},
         {"W", "what grew since the previous scan"},
         {"P", "progress of a deletion, packing or scan running (S there stops it)"},
