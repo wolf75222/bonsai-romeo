@@ -31,9 +31,13 @@ Lists what could be cleaned, biggest first, with what each entry is and how to c
 
 ## Quotas: `U`
 
+![Quota view](../img/quotas.png)
+
 Shows your quotas for space and number of files: how much is left, and the grace period when a soft limit is exceeded. `R` refreshes them. The same view prints with `bonsai-romeo --quota`. See [Quotas on ROMEO](quotas.md).
 
 ## Deleting: `D`
+
+![Delete dialog](../img/delete.png)
 
 `D` (or `fn` + `⌫`, which sends `SUPPR`) asks first, showing the path, size and file count. The dialog starts on **cancel**: `RIGHT` then `ENTER` deletes. It only deletes your own files inside your spaces, never a whole space. Big folders are deleted in the background, and deleting works while the scan runs.
 

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstdlib>
 #include <grp.h>
 #include <map>
 #include <pwd.h>
@@ -55,8 +56,14 @@ uint64_t number(const std::string& s) {
 - Block values are in KiB
 */
 std::vector<std::map<std::string, std::string>> query(const std::string& args) {
-    const std::string command = "timeout " + std::to_string(QUERY_TIMEOUT) + " mmlsquota -Y " + args + " " + DEVICE + " 2>/dev/null"
-                              + " || timeout " + std::to_string(QUERY_TIMEOUT) + " /usr/lpp/mmfs/bin/mmlsquota -Y " + args + " " + DEVICE + " 2>/dev/null";
+    const std::string timeout = "timeout " + std::to_string(QUERY_TIMEOUT) + " ";
+
+    // BONSAI_MMLSQUOTA: another mmlsquota to run (elsewhere on another cluster, or one printing made-up quotas for a demo)
+    const char* custom = std::getenv("BONSAI_MMLSQUOTA");
+    const std::string command = custom && *custom
+        ? timeout + custom + " -Y " + args + " " + DEVICE + " 2>/dev/null"
+        : timeout + "mmlsquota -Y " + args + " " + DEVICE + " 2>/dev/null"
+          + " || " + timeout + "/usr/lpp/mmfs/bin/mmlsquota -Y " + args + " " + DEVICE + " 2>/dev/null";
 
     std::vector<std::map<std::string, std::string>> rows;
     std::vector<std::string> header;
@@ -91,7 +98,9 @@ Quota::Row toRow(const std::map<std::string, std::string>& r, bool group, const 
 
     Quota::Row row;
     row.group = group;
-    row.name = name;
+    // The name mmlsquota gives ("-" for the user's own quotas), or the one asked for
+    const std::string listed = get("name");
+    row.name = !listed.empty() && listed != "-" ? listed : name;
     row.fileset = get("filesetname");
 
     row.space.used = number(get("blockUsage")) * 1024;
@@ -104,9 +113,9 @@ Quota::Row toRow(const std::map<std::string, std::string>& r, bool group, const 
     row.inodes.hard = number(get("filesLimit"));
     row.inodes.grace = get("filesGrace");
 
-    if (row.fileset == "home") row.path = "/home/" + name;
-    else if (row.fileset == "scratch") row.path = "/scratch_p/" + name;
-    else if (row.fileset == "projet") row.path = group ? "/project/" + name : "/project";
+    if (row.fileset == "home") row.path = "/home/" + row.name;
+    else if (row.fileset == "scratch") row.path = "/scratch_p/" + row.name;
+    else if (row.fileset == "projet") row.path = group ? "/project/" + row.name : "/project";
     else row.path = "/" + row.fileset;
 
     return row;

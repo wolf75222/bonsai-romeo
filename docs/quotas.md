@@ -15,6 +15,8 @@ Files you put in a project folder must belong to the project group. Files left w
 
 Quotas count blocks on disk. In the explorer, `F` switches to the size on disk, which matches them.
 
+![Quota view](../img/quotas.png)
+
 Example of `bonsai-romeo --quota` (`|` marks the soft limit, the end of the bar the hard limit):
 
 ```

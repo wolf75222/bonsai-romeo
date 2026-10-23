@@ -21,5 +21,6 @@ Environment variables:
 | `BONSAI_ROOTS=dir1:dir2` | spaces to show instead of the detected ones; `dir=shown` sets how a path is displayed (`/tmp/demo=~`) |
 | `BONSAI_THREADS=n` | number of scan threads, e.g. inside a job |
 | `BONSAI_COLOR=truecolor`, `256` or `16` | force the colors for one run |
+| `BONSAI_MMLSQUOTA=command` | the `mmlsquota` to run for the quotas (default: the one in `PATH`, then `/usr/lpp/mmfs/bin`) |
 
 The previous scan is cached in `~/.cache/bonsai-romeo/db.txt`. Only folders of at least 1 MiB or 500 files are kept.
