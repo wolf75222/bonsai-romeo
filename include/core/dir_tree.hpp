@@ -49,6 +49,7 @@ public:
         std::atomic<uint64_t> inodes{0};          // Files and directories of the user below it (GPFS file quota)
         std::atomic<int64_t> newest{0};           // Last modification (seconds since 1970) of the user's entries below it
         std::atomic<uint32_t> pending{0};         // Sub-directories not complete yet
+        std::atomic<bool> read{false};            // Its own entries were read and counted (see listed())
         std::atomic<bool> complete{false};        // This directory and everything below it was scanned
         std::atomic<const Block*> children{nullptr}; // nullptr: not listed yet, or no sub-directories
         uint32_t parent = NONE;

@@ -351,7 +351,9 @@ int main(int argc, char* argv[]) {
             const Scanner::Totals totals = scanner.totals(path);
             std::string amount;
             if (is_dir) {
-                amount = FormatUtils::toReadable(totals.disk, " ") + " on disk, " + FormatUtils::toCount(totals.inodes, " ") + " files";
+                // "~": not final yet (from the previous scan, or still being scanned)
+                const std::string about = totals.final ? "" : "~";
+                amount = about + FormatUtils::toReadable(totals.disk, " ") + " on disk, " + about + FormatUtils::toCount(totals.inodes, " ") + " files";
             } else {
                 std::error_code ec;
                 amount = FormatUtils::toReadable(fs::file_size(path, ec), " ");

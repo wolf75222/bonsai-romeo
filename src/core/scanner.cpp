@@ -4,6 +4,7 @@
 #include "../../include/utils/format.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -521,10 +522,6 @@ std::vector<Scanner::SearchHit> Scanner::search(const std::string& query, size_t
 }
 
 Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
-    if (!this->done) {
-        return ScannerRemoveResult{"Scanner hasn't completed yet.", true};
-    }
-
     // Shared spaces (/project) hold other people's data: never touch it
     if (!scope.owns(path) || scope.relation(path.native()) != UserScope::Relation::INSIDE) {
         return ScannerRemoveResult{"This isn't yours: only your own files can be removed.", true};
@@ -535,30 +532,44 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
         return ScannerRemoveResult{"This is one of your spaces: open it and delete what is inside instead.", true};
     }
 
-    DirTree::Counts removed;
-    uint32_t removed_dir = DirTree::NONE;
-
-    if(fs::is_directory(path)) {
-        removed_dir = tree.find(path.native());
-
-        if (removed_dir != DirTree::NONE) {
-            const DirTree::Node& node = tree.node(removed_dir);
-            removed.bytes = node.size.load();
-            removed.disk = node.disk.load();
-            removed.inodes = node.inodes.load();
+    /* During the scan too
+    - Upstream refused ("Scanner hasn't completed yet"): what is removed may not be fully counted yet,
+      so taking it off the folders above could leave wrong totals
+    - Instead the removal waits for the scan where it has to (see below), on the deleting thread:
+      false when the scan stopped first (the program is quitting)
+    */
+    auto waitFor = [this](const std::function<bool()>& ready) {
+        while (!ready()) {
+            if (done.load())
+                return ready();
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
         }
-    } else {
+        return true;
+    };
+
+    std::error_code ec;
+    const bool is_dir = fs::is_directory(fs::symlink_status(path, ec));
+    const uint32_t parent = tree.find(path.parent_path().native());
+
+    /* A file is counted when its folder is read
+    - Removed before that, it would be taken off totals it was never added to: wait (it is nearly always read already)
+    - A file with other hard links frees nothing, and was counted once, maybe elsewhere: nothing to take off
+    */
+    DirTree::Counts file_counts;
+    if (!is_dir) {
+        if (parent != DirTree::NONE)
+            waitFor([&] { return tree.node(parent).read.load(std::memory_order_acquire); });
+
         struct stat st;
-        if (lstat(path.c_str(), &st) == 0) {
-            removed.bytes = S_ISREG(st.st_mode) ? static_cast<uint64_t>(st.st_size) : 0;
-            removed.disk = static_cast<uint64_t>(st.st_blocks) * 512;
-            removed.inodes = 1;
+        if (lstat(path.c_str(), &st) == 0 && st.st_nlink <= 1) {
+            file_counts.bytes = S_ISREG(st.st_mode) ? static_cast<uint64_t>(st.st_size) : 0;
+            file_counts.disk = static_cast<uint64_t>(st.st_blocks) * 512;
+            file_counts.inodes = 1;
         }
     }
 
-    std::error_code ec;
     try {
-        if (fs::is_directory(path)) {
+        if (is_dir) {
             fs::remove_all(path, ec);
         } else {
             fs::remove(path, ec);
@@ -566,22 +577,33 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     } catch (const fs::filesystem_error&) {}
 
     if (ec) {
-        return ScannerRemoveResult{ec.message(), true};;
+        return ScannerRemoveResult{ec.message(), true};
     }
 
-    // Every directory above the removed entry just got smaller
-    uint32_t parent = tree.find(path.parent_path().native());
+    if (!is_dir) {
+        if (parent != DirTree::NONE)
+            tree.subtract(parent, file_counts);
+    } else {
+        /* A folder: everything the scan counted in it leaves every folder above it
+        - Its totals are final once it is complete: during the scan that comes fast, its content being gone
+        - Looked up after the removal: the scan may have just found it
+        */
+        const uint32_t dir = tree.find(path.native());
 
-    if (parent != DirTree::NONE) {
-        tree.subtract(parent, removed);
-    }
+        if (dir != DirTree::NONE) {
+            waitFor([&] { return tree.node(dir).complete.load(std::memory_order_acquire); });
 
-    if (removed_dir != DirTree::NONE) {
-        tree.node(removed_dir).removed = true;
+            DirTree::Node& node = tree.node(dir);
+            const DirTree::Counts counts{node.size.load(), node.disk.load(), node.inodes.load(), 0};
+
+            node.removed = true;
+            if (node.parent != DirTree::NONE)
+                tree.subtract(node.parent, counts);
+        }
     }
 
     this->snapshot();
-    return ScannerRemoveResult{"", false};;
+    return ScannerRemoveResult{"", false};
 }
 
 void Scanner::scan() {

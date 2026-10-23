@@ -146,6 +146,8 @@ void DirTree::subtract(uint32_t dir, const Counts& counts) {
 }
 
 void DirTree::listed(uint32_t dir, uint32_t subdirs) {
+    node(dir).read.store(true, std::memory_order_release);
+
     if (subdirs > 0) {
         node(dir).pending.store(subdirs, std::memory_order_release);
         return;
