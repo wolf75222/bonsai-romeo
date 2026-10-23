@@ -22,23 +22,30 @@ bonsai-romeo /project/<group>  # one folder
 bonsai-romeo --quota           # your quotas
 bonsai-romeo --cleanup         # what could be cleaned
 bonsai-romeo --summary         # size and file count of each space
+bonsai-romeo --quota --json    # the same as JSON (also --summary, --cleanup)
 ```
 
 | Key | |
 |---|---|
-| `ENTER` / `⌫` | open / go up |
+| `ENTER` / `⌫` | open / go up (`l` / `h` too) |
 | `F` | size, size on disk, number of files |
+| `S` / `A` | order: size, name, oldest first / age column |
 | `/` | search folders |
 | `C` | cleanup suggestions |
-| `U` | quotas |
-| `D` | delete (asks first) |
-| `Q` | quit |
+| `U` | quotas, then `1`-`9` to open a space |
+| `W` | what grew since the previous scan |
+| `R` | scan the folder again |
+| `SPACE` / `D` | mark / delete (asks first) |
+| `T` | pack a folder into one `.tar` (file quota) |
+| `Y` | copy the path |
+| `?` | every key |
 
 ## What it does
 
 - Shows only your data: your spaces and your files. Other members' files in a project stay hidden.
 - Shows your GPFS quotas, for space and number of files.
-- Suggests what to clean: caches, build folders, old data, core dumps, largest files.
+- Suggests what to clean: caches, build folders, old data, folders of many files, core dumps, largest files.
+- Packs a folder into one `.tar` when the file quota is the problem, and shows what grew since last time.
 - Searches all your folders by name.
 - Starts at once from the previous scan, and counts like the quotas do (hard links once).
 - Works in any terminal, over SSH too: 24-bit colors, round chart, aligned columns.

@@ -9,6 +9,11 @@
 - Quitting waits for one `mmlsquota` call at most when GPFS is slow (it waited for all of them, twice when one timed out).
 - `?` marks a folder of yours that the scan doesn't know (made after it). A folder you open again is read again.
 - Cleanup suggestions are computed in the background. Old data only counts folders scanned completely, and files already deleted aren't listed.
+- For the file quota: folders of many files in the cleanup view, `T` to pack one into a checked `.tar`, and quota cards that open their space sorted by files and say how much to remove.
+- `R` scans a folder again, `W` lists what grew since the previous scan, `SPACE` marks entries for one deletion, `S` / `A` order by name or age, `Y` copies a path (OSC 52), `?` lists every key, vim keys, and `--json`.
+- Folders that couldn't be read are marked `!` and listed (`!`), instead of being silently counted as smaller.
+- A deleted file that changed after the scan started gets its folder scanned again, so the totals stay exact.
+- A window whose list was empty (a cleanup filter with nothing in it) took no key at all: ESC and TAB went nowhere.
 
 **Fixes that also apply to bonsai** (reported upstream)
 

@@ -9,6 +9,8 @@
 #include <ftxui/screen/color.hpp>
 
 #include <algorithm>
+#include <cctype>
+#include <ctime>
 #include <iomanip>
 #include <sstream>
 #include <thread>
@@ -92,6 +94,8 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
                     item.size = scanner->value(totals);
                     item.final = totals.final;
                     item.known = totals.known;
+                    item.error = totals.error;
+                    item.newest = totals.newest;
                     item.snapped_size = scanner->getSnapped(root);
                     unsorted_entries.push_back(std::move(item));
                 }
@@ -110,29 +114,48 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
 
                 if (!item.is_dir) {
                     item.size = scanner->fileValue(entry.bytes, entry.disk);
+                    item.newest = entry.mtime;
                     item.snapped_size = 0;
                 } else {
                     const Scanner::Totals totals = scanner->totals(entry.path);
                     item.size = scanner->value(totals);
                     item.final = totals.final;
                     item.known = totals.known;
+                    item.error = totals.error;
+                    item.newest = totals.newest;
                     item.snapped_size = scanner->getSnapped(entry.path);
                 }
 
                 unsorted_entries.push_back(std::move(item));
             }
 
-            /* Sort the aquired data:
+            /* Sort the aquired data (key S):
             - Directories go first
-            - Then compare size descending
-            - Then compare name ascending
+            - Then size descending (for the metric shown: F gives size, size on disk or files),
+              or name (case aside), or age: the oldest change first, unknown dates last
+            - Then name ascending
             */
-            std::sort(unsorted_entries.begin(), unsorted_entries.end(), [](const AppData::BonsaiMenuEntry& a, const AppData::BonsaiMenuEntry& b) {
+            const AppData::Sort sort = data->sort.load();
+            auto folded = [](const std::string& s) {
+                std::string out(s);
+                std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+                return out;
+            };
+
+            std::sort(unsorted_entries.begin(), unsorted_entries.end(), [sort, &folded](const AppData::BonsaiMenuEntry& a, const AppData::BonsaiMenuEntry& b) {
                 if (a.is_dir != b.is_dir)
                     return a.is_dir;
 
-                if (a.size != b.size)
+                if (sort == AppData::Sort::NAME) {
+                    const std::string fa = folded(a.label), fb = folded(b.label);
+                    if (fa != fb)
+                        return fa < fb;
+                } else if (sort == AppData::Sort::AGE) {
+                    if (a.newest != b.newest)
+                        return b.newest == 0 || (a.newest != 0 && a.newest < b.newest);
+                } else if (a.size != b.size) {
                     return a.size > b.size;
+                }
 
                 return a.label < b.label;
             });
@@ -252,11 +275,14 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
         const auto& item = (*data->menu_entries)[entry_state.index];
         const bool is_selected = entry_state.active;
+        const bool is_marked = !data->marked.empty() && data->marked.count(item.path) > 0;
         const Config& config = Config::get();
 
         std::string icon_str;
         if (item.label == "..") {
             icon_str = config.SIDEBAR_BACK_ICON;
+        } else if (is_marked) {
+            icon_str = "*";
         } else {
             icon_str = is_selected ? (item.is_dir ? config.SIDEBAR_SELECTED_FOLDER_ICON : config.SIDEBAR_SELECTED_FILE_ICON)
                                    : (item.is_dir ? config.SIDEBAR_FOLDER_ICON          : config.SIDEBAR_FILE_ICON);
@@ -309,7 +335,13 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
         const int width = std::max(*sidebar_width - 1, 12);
         const int size_width = 7;                         // "~" + toCompact / toCount (5 characters at most)
         const int growth_width = width >= 30 ? 8 : 0;     // " +12.3%"
-        const int name_width = width - size_width - growth_width;
+        const int age_width = data->show_age && width >= 36 ? 6 : 0;   // " 1.4y"
+        const int name_width = width - size_width - growth_width - age_width;
+
+        const std::string age = item.label == ".." || item.newest <= 0 ? "" : FormatUtils::toAgeShort(std::time(nullptr) - item.newest);
+
+        // "~": not final yet, from the previous scan or still being scanned. "?": not in the scan. "!": a folder in it couldn't be read
+        const std::string mark = !item.known ? "" : item.error ? "!" : item.final ? "" : "~";
 
         auto row = hbox({
             text(" " + icon_str + " " + FormatUtils::trimSuffix(item.label, std::max(name_width - 4, 1), "...")) | size(WIDTH, EQUAL, name_width),
@@ -321,13 +353,19 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             hbox(
                 filler(),
-                // "~": not final yet, from the previous scan or still being scanned. "?": not in the scan
-                text(item.label == ".." ? "" : !item.known ? "?" : (item.final ? "" : "~") + scanner->formatShort(item.size)) | color(Color::GrayDark)
+                text(age) | color(Color::GrayDark)
+            ) | size(WIDTH, EQUAL, age_width),
+
+            hbox(
+                filler(),
+                text(item.label == ".." ? "" : mark) | color(item.error ? Color::RGB(255, 140, 0) : Color::GrayDark),
+                text(item.label == ".." ? "" : !item.known ? "?" : scanner->formatShort(item.size)) | color(Color::GrayDark)
             ) | size(WIDTH, EQUAL, size_width)
         });
 
+        // Marked entries (SPACE): yellow, as long as they aren't the selected one
         return is_selected ? row | bgcolor(Color::White) | color(Color::Black)
-                           : row | bgcolor(Color::Default) | color(Color::White);
+                           : row | bgcolor(Color::Default) | color(is_marked ? Color::RGB(255, 215, 0) : Color::White);
     };
 
     // On selected: update data with a new path, and wake worker thread

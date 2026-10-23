@@ -76,6 +76,27 @@ public:
         return oss.str();
     }
 
+    // Same, at most 4 characters, for a column: 5m, 3h, 12d, 7mo, 1.4y
+    static std::string toAgeShort(int64_t seconds) {
+        if (seconds < 0) seconds = 0;
+
+        std::ostringstream oss;
+        if (seconds < 3600)
+            oss << seconds / 60 << "m";
+        else if (seconds < 86400)
+            oss << seconds / 3600 << "h";
+        else if (seconds < 60 * 86400)
+            oss << seconds / 86400 << "d";
+        else if (seconds < 365 * 86400)
+            oss << seconds / (30 * 86400) << "mo";
+        else if (seconds < 10 * 365 * 86400)
+            oss << std::fixed << std::setprecision(1) << seconds / (365.0 * 86400) << "y";
+        else
+            oss << seconds / (365 * 86400) << "y";
+
+        return oss.str();
+    }
+
     // A count in a short format: 987, 12.3k, 1.50M
     static std::string toCount(uintmax_t count, const std::string& spacer = "") {
         std::ostringstream oss;

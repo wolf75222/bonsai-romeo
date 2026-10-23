@@ -234,8 +234,21 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
 
     const bool above_scope = relation == UserScope::Relation::ANCESTOR;
 
+    /* A directory that can't be opened
+    - Gone meanwhile: nothing is missing
+    - No permission: normal for other people's folders in a project (nothing of the user's in them);
+      a folder of the user's own is reported, since what it holds isn't counted
+    - Anything else (I/O error, stale GPFS handle...) is reported: the totals above it may be too low
+    */
     const int fd = open(scratch.path.c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
     if (fd < 0) {
+        const int error = errno;
+        struct stat own;
+        const bool denied = error == EACCES || error == EPERM;
+        if (error != ENOENT && error != ENOTDIR && error != ELOOP
+            && (!denied || (lstat(scratch.path.c_str(), &own) == 0 && own.st_uid == scope.uid)))
+            tree.markError(task.dir, error);
+
         tree.listed(task.dir, 0);
         return;
     }
@@ -260,13 +273,22 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
     uint32_t dir_count = 0;
     scratch.names.clear();
 
+    // Entries whose stat failed: reported once (a folder readable but not searchable fails them all)
+    bool stat_failed = false;
+
     // A huge directory takes many rounds, so the stop flag is checked on each of them
     while (!stop.load(std::memory_order_relaxed)) {
         const long length = syscall(SYS_getdents64, fd, scratch.entries.data(), scratch.entries.size());
 
         if (length < 0 && errno == EINTR)
             continue;
-        if (length <= 0)
+
+        // An error in the middle of a directory (EIO on GPFS...): the rest of it is missing
+        if (length < 0) {
+            tree.markError(task.dir, errno);
+            break;
+        }
+        if (length == 0)
             break;
 
         for (long at = 0; at < length;) {
@@ -288,8 +310,15 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
                     continue;
 
                 EntryStat file;
-                if (!statEntry(fd, name, file))
+                if (!statEntry(fd, name, file)) {
+                    // Removed meanwhile: nothing missing. Others' folders without x permission aren't the user's
+                    const int error = errno;
+                    if (error != ENOENT && !stat_failed && !above_scope && (error != EACCES || st.st_uid == scope.uid)) {
+                        stat_failed = true;
+                        tree.markError(task.dir, error);
+                    }
                     continue;
+                }
 
                 if (!S_ISDIR(file.mode)) {
                     /* Hard links (conda environments, git, spack...): one file in several folders

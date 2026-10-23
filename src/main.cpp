@@ -2,13 +2,18 @@
 #include "../include/ui/modal_error.hpp"
 #include "../include/config/config.hpp"
 #include "../include/core/app_data.hpp"
+#include "../include/core/archive.hpp"
 #include "../include/core/scanner.hpp"
 #include "../include/ui/piechart.hpp"
 #include "../include/ui/menu.hpp"
 #include "../include/ui/quota_view.hpp"
 #include "../include/ui/cleanup_view.hpp"
+#include "../include/ui/errors_view.hpp"
+#include "../include/ui/growth_view.hpp"
+#include "../include/ui/help_view.hpp"
 #include "../include/ui/search_view.hpp"
 #include "../include/utils/format.hpp"
+#include "../include/utils/json.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
 #include <ftxui/component/component.hpp>
@@ -18,12 +23,15 @@
 #include <cstdlib>
 #include <algorithm>
 #include <cctype>
+#include <cstring>
 #include <optional>
 #include <string>
 #include <vector>
 
+#include <csignal>
 #include <cstdio>
 #include <iostream>
+#include <sstream>
 #include <unistd.h>
 #include <thread>
 #include <atomic>
@@ -96,12 +104,36 @@ static std::optional<ftxui::Terminal::Color> chooseColors(std::string mode) {
     return std::nullopt;
 }
 
+/* Clipboard (key Y)
+- OSC 52 asks the terminal itself to copy: it works through SSH, from the login node to the user's computer
+- Most terminals do it (iTerm2 asks first, tmux needs set-clipboard on); the rest ignore it silently
+*/
+static void copyToClipboard(const std::string& value) {
+    static const char* digits = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string encoded;
+
+    for (size_t i = 0; i < value.size(); i += 3) {
+        const uint32_t a = static_cast<unsigned char>(value[i]);
+        const uint32_t b = i + 1 < value.size() ? static_cast<unsigned char>(value[i + 1]) : 0;
+        const uint32_t c = i + 2 < value.size() ? static_cast<unsigned char>(value[i + 2]) : 0;
+        const uint32_t triple = (a << 16) | (b << 8) | c;
+
+        encoded += digits[(triple >> 18) & 63];
+        encoded += digits[(triple >> 12) & 63];
+        encoded += i + 1 < value.size() ? digits[(triple >> 6) & 63] : '=';
+        encoded += i + 2 < value.size() ? digits[triple & 63] : '=';
+    }
+
+    std::cout << "\033]52;c;" << encoded << "\a" << std::flush;
+}
+
 int main(int argc, char* argv[]) {
     using namespace ftxui;
 
     bool summary = false;
     bool quota_only = false;
     bool cleanup_only = false;
+    bool json = false;
     std::vector<std::string> args;
 
     for (int i = 1; i < argc; i++) {
@@ -113,26 +145,37 @@ int main(int argc, char* argv[]) {
             quota_only = true;
         } else if (arg == "--cleanup") {
             cleanup_only = true;
+        } else if (arg == "--json") {
+            json = true;
         } else if (arg == "-h" || arg == "--help") {
-            std::cout << "Usage: bonsai-romeo [--summary | --quota | --cleanup] [path]\n"
+            std::cout << "Usage: bonsai-romeo [--summary | --quota | --cleanup] [--json] [path]\n"
                          "  Shows only your own data: home, scratch and your /project/<group> folders.\n"
                          "  --summary   scan, print size, disk usage and file count of each of your spaces, and exit\n"
                          "  --quota     print your GPFS quotas (space and files) with gauges, and exit\n"
-                         "  --cleanup   scan, print what could be cleaned (caches, builds, old data, large files), and exit\n"
+                         "  --cleanup   scan, print what could be cleaned (caches, builds, old data, many files, large files), and exit\n"
+                         "  --json      with one of the above: the same as JSON, for scripts\n"
                          "  BONSAI_ROOTS=dir1:dir2   override the detected spaces\n"
                          "  BONSAI_THREADS=n         scan threads (default: automatic, up to 32)\n"
                          "  BONSAI_COLOR=truecolor|256|16   force the color mode (default: auto)\n"
-                         "Keys: F size / disk / files, / search folders, C cleanup suggestions, U quotas, R refresh quotas,\n"
-                         "      D (or SUPPR) delete, ENTER open, Backspace/ESC up, Q quit\n"
-                         "Sizes marked ~ come from the previous scan (or are still growing) until the folder is scanned.\n";
+                         "Keys (? in the program lists them all):\n"
+                         "  ENTER/l open, Backspace/ESC/h up, j/k g/G move, F size / disk / files, S order, A age column,\n"
+                         "  R scan the folder again, SPACE mark, X clear marks, D delete, T pack a folder into one .tar,\n"
+                         "  Y copy the path, / search, C cleanup, U quotas (1-9 open a space), W what grew, ! unreadable folders, Q quit\n"
+                         "Sizes marked ~ come from the previous scan (or are still growing), ? aren't scanned, ! hold an unreadable folder.\n";
             return 0;
         } else {
             args.push_back(arg);
         }
     }
 
+    if (json && !summary && !quota_only && !cleanup_only) {
+        std::cerr << "--json goes with --summary, --quota or --cleanup" << std::endl;
+        return 1;
+    }
+
     if (quota_only) {
-        std::cout << BonsaiQuotaView::toText(Quota::fetch(), isatty(STDOUT_FILENO));
+        const Quota::Report report = Quota::fetch();
+        std::cout << (json ? BonsaiQuotaView::toJson(report) : BonsaiQuotaView::toText(report, isatty(STDOUT_FILENO)));
         return 0;
     }
 
@@ -184,7 +227,10 @@ int main(int argc, char* argv[]) {
     if (cleanup_only) {
         Scanner scanner = Scanner(default_path, db_path, scope);
         scanner.scan();
-        std::cout << BonsaiCleanup::toText(scanner.cleanup(), scope, 40);
+        const auto items = scanner.cleanup();
+        std::cout << (json ? BonsaiCleanup::toJson(items, scope) : BonsaiCleanup::toText(items, scope, 40));
+        if (!json)
+            std::cerr << BonsaiErrors::toText(scanner.readErrors(10), scanner.readErrorCount(), scope);
         scanner.snapshot();
         return 0;
     }
@@ -202,18 +248,42 @@ int main(int argc, char* argv[]) {
         if (shown.empty())
             shown.push_back(default_path.string());
 
+        const std::vector<Scanner::ReadError> errors = scanner.readErrors(100);
+        const uint32_t error_count = scanner.readErrorCount();
+
         Scanner::Totals total;
-        for (const auto& path : shown) {
+        std::ostringstream spaces;
+        for (size_t i = 0; i < shown.size(); i++) {
+            const std::string& path = shown[i];
             const Scanner::Totals t = scanner.totals(path);
             total.bytes += t.bytes;
             total.disk += t.disk;
             total.inodes += t.inodes;
 
-            std::printf("%10s %10s on disk %10s files   %s\n", FormatUtils::toReadableShort(t.bytes).c_str(), FormatUtils::toReadableShort(t.disk).c_str(),
-                        FormatUtils::toCount(t.inodes).c_str(), scope.display(path).c_str());
+            if (json) {
+                spaces << (i ? ",\n  " : "\n  ") << "{\"path\": " << Json::str(path) << ", \"shown\": " << Json::str(scope.display(path))
+                       << ", \"bytes\": " << t.bytes << ", \"disk\": " << t.disk << ", \"files\": " << t.inodes
+                       << ", \"read_errors\": " << (t.error ? "true" : "false") << "}";
+            } else {
+                std::printf("%10s %10s on disk %10s files   %s%s\n", FormatUtils::toReadableShort(t.bytes).c_str(), FormatUtils::toReadableShort(t.disk).c_str(),
+                            FormatUtils::toCount(t.inodes).c_str(), scope.display(path).c_str(), t.error ? "  (!)" : "");
+            }
         }
-        std::printf("%10s %10s on disk %10s files   total (%u directories)\n", FormatUtils::toReadableShort(total.bytes).c_str(), FormatUtils::toReadableShort(total.disk).c_str(),
-                    FormatUtils::toCount(total.inodes).c_str(), scanner.directories());
+
+        if (json) {
+            std::cout << "{\"spaces\": [" << spaces.str() << "\n],\n\"total\": {\"bytes\": " << total.bytes << ", \"disk\": " << total.disk
+                      << ", \"files\": " << total.inodes << "},\n\"directories\": " << scanner.directories()
+                      << ",\n\"read_error_count\": " << error_count << ",\n\"read_errors\": [";
+            for (size_t i = 0; i < errors.size(); i++) {
+                std::cout << (i ? ",\n  " : "\n  ") << "{\"path\": " << Json::str(errors[i].path) << ", \"shown\": " << Json::str(scope.display(errors[i].path))
+                          << ", \"error\": " << Json::str(std::strerror(errors[i].error)) << "}";
+            }
+            std::cout << "\n]}\n";
+        } else {
+            std::printf("%10s %10s on disk %10s files   total (%u directories)\n", FormatUtils::toReadableShort(total.bytes).c_str(), FormatUtils::toReadableShort(total.disk).c_str(),
+                        FormatUtils::toCount(total.inodes).c_str(), scanner.directories());
+            std::cout << BonsaiErrors::toText(errors, error_count, scope);
+        }
 
         scanner.snapshot();
         return 0;
@@ -234,11 +304,15 @@ int main(int argc, char* argv[]) {
     bool show_quota = false;
     bool show_cleanup = false;
     bool show_search = false;
+    bool show_help = false;
+    bool show_growth = false;
+    bool show_errors = false;
 
     Scanner scanner = Scanner(default_path, db_path, scope);
-    std::thread scanner_thread([&scanner]() {
+    std::thread scanner_thread([&scanner, &screen]() {
         scanner.scan();
         scanner.snapshot();
+        screen.PostEvent(Event::Custom);
     });
 
     // Init shared menu & pie data
@@ -251,71 +325,242 @@ int main(int argc, char* argv[]) {
     data->path = std::make_shared<std::string>(default_path);
     data->selected = std::make_shared<int>(0);
 
+    // Wakes the menu and the pie up: the folder shown, its order or its sizes changed
+    auto wake = [&data] {
+        {
+            std::lock_guard<std::mutex> lock(data->cv_mutex);
+            data->menu_path_changed = true;
+            data->pie_path_changed = true;
+        }
+        data->cv.notify_all();
+    };
+
+    // A message under the title for a few seconds (UI thread only)
+    std::string notice;
+    auto notice_until = std::chrono::steady_clock::now();
+    auto say = [&](const std::string& message) {
+        notice = message;
+        notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    };
+
     /* Init confirm & error modals
     - Allow quitting modal with button
     - Allow quitting modal with escape key
     */
     bool show_confirm_modal = false;
     bool show_error_modal = false;
-    Scanner::ScannerRemoveResult result = Scanner::ScannerRemoveResult{"", false};
+    std::string error_title;
+    std::string error_message;
 
-    /* Deletion
-    - D asks first, showing what and how much; the window starts on "cancel"
-    - Removing a big folder from GPFS can take minutes: it runs on its own thread, the explorer stays usable
-    - Only one at a time; quitting waits for it to finish
+    /* Background jobs: deleting, packing a folder into one file, scanning a folder again
+    - On their own thread, one at a time: GPFS can take minutes, the explorer stays usable
+    - The title says what runs; when it ends, a notice says how it went, or the error window does
+    - Quitting waits for a deletion to finish; packing and scanning are stopped (nothing is lost)
     */
-    std::string confirm_target;   // Shown in the confirm window
-    std::string confirm_path;     // What D asked to delete
-    int confirm_focus = 0;        // 0: cancel, 1: delete
-    std::atomic<bool> deleting{false};
-    std::string deleting_label;   // UI thread only
-    std::string notice;           // "deleted ...", shown under the title for a few seconds (UI thread only)
-    auto notice_until = std::chrono::steady_clock::now();
-    std::thread delete_thread;
+    struct JobResult {
+        bool failed = false;
+        std::string title;                 // Of the error window, when failed
+        std::string message;               // The notice, or the error
+        std::vector<std::string> deleted;  // Paths gone: their marks go too
+    };
+
+    std::thread job_thread;
+    std::atomic<bool> job_running{false};
+    std::atomic<bool> job_stoppable{false};
+    std::atomic<bool> quitting{false};
+    std::string job_label;                 // UI thread only: "deleting ~/x"
+    std::atomic<uint64_t> job_done{0};
+    std::atomic<uint64_t> job_total{0};
+    std::atomic<pid_t> tar_child{0};
+    std::atomic<bool> tar_stop{false};
+
+    // Set once the marks summary exists (below): what is deleted leaves the marks
+    std::function<void()> marks_changed;
+
+    // UI thread: what a job did
+    auto finishJob = [&](const JobResult& r) {
+        job_running = false;
+
+        for (const auto& gone : r.deleted) {
+            for (auto it = data->marked.begin(); it != data->marked.end();)
+                it = UserScope::isUnder(*it, gone) ? data->marked.erase(it) : std::next(it);
+        }
+        if (marks_changed)
+            marks_changed();
+
+        data->listing_version++;
+
+        if (r.failed) {
+            error_title = r.title;
+            error_message = r.message;
+            show_error_modal = true;
+        } else if (!r.message.empty()) {
+            say(r.message);
+        }
+
+        wake();
+    };
+
+    auto startJob = [&](const std::string& label, bool stoppable, std::function<JobResult()> work) {
+        if (job_running) {
+            say("wait: " + job_label + " first");
+            return;
+        }
+        if (job_thread.joinable())
+            job_thread.join();
+
+        job_running = true;
+        job_stoppable = stoppable;
+        job_label = label;
+        job_done = 0;
+        job_total = 0;
+
+        job_thread = std::thread([&, work] {
+            const JobResult r = work();
+            screen.Post([&, r] { finishJob(r); });
+            screen.PostEvent(Event::Custom);
+        });
+    };
+
+    // From a job's thread: what the title says
+    auto relabel = [&](const std::string& label) {
+        screen.Post([&, label] { job_label = label; });
+        screen.PostEvent(Event::Custom);
+    };
+
+    /* Deleting (D)
+    - What is inside a folder deleted just before is gone with it
+    - A deleted file that changed since the scan may not have been counted with its current size: its folder is
+      scanned again (see Scanner::remove()), each folder once, so the totals stay exact
+    */
+    auto removeAll = [&](const std::vector<std::string>& paths) {
+        JobResult r;
+        std::vector<std::string> failures;
+        std::vector<std::string> rescans;
+        std::string remark;
+
+        for (const auto& path : paths) {
+            if (std::any_of(r.deleted.begin(), r.deleted.end(), [&path](const std::string& d) { return UserScope::isUnder(path, d); })) {
+                r.deleted.push_back(path);
+                continue;
+            }
+
+            const Scanner::ScannerRemoveResult removed = scanner.remove(path);
+            if (removed.failed) {
+                failures.push_back((paths.size() > 1 ? scope.display(path) + ": " : "") + removed.reason);
+                continue;
+            }
+
+            r.deleted.push_back(path);
+            if (!removed.rescan.empty())
+                rescans.push_back(removed.rescan);
+            if (!removed.reason.empty())
+                remark = removed.reason;
+        }
+
+        std::sort(rescans.begin(), rescans.end());
+        rescans.erase(std::unique(rescans.begin(), rescans.end()), rescans.end());
+        for (size_t i = 0; i < rescans.size() && !quitting; i++) {
+            if (i > 0 && UserScope::isUnder(rescans[i], rescans[i - 1]))
+                continue;
+            relabel("scanning " + scope.display(rescans[i]) + " again for exact totals");
+            scanner.rescan(rescans[i]);
+        }
+
+        if (!failures.empty()) {
+            r.failed = true;
+            r.title = paths.size() == 1 ? "Deleting " + FormatUtils::trimMiddle(scope.display(paths.front()), 60) + " failed"
+                                        : std::to_string(failures.size()) + " of " + std::to_string(paths.size()) + " entries couldn't be deleted";
+            for (size_t i = 0; i < failures.size() && i < 8; i++)
+                r.message += (i ? "\n" : "") + failures[i];
+            if (failures.size() > 8)
+                r.message += "\n... and " + std::to_string(failures.size() - 8) + " more";
+            return r;
+        }
+
+        r.message = paths.size() == 1 ? "deleted " + scope.display(paths.front()) : "deleted " + std::to_string(paths.size()) + " entries";
+        if (!remark.empty())
+            r.message += " (" + remark + ")";
+        return r;
+    };
+
+    // Packing a folder into one .tar (T), then deleting the folder once the archive is checked
+    auto packFolder = [&](const std::string& path) {
+        JobResult r;
+        const Archive::Result packed = Archive::pack(path, [&](uint64_t done, uint64_t total) {
+            job_done = done;
+            job_total = total;
+            screen.PostEvent(Event::Custom);
+        }, tar_child, tar_stop);
+
+        if (!packed.ok) {
+            r.failed = true;
+            r.title = "Packing " + FormatUtils::trimMiddle(scope.display(path), 60) + " failed";
+            r.message = "Nothing was deleted. " + packed.error;
+            return r;
+        }
+
+        scanner.addFile(packed.archive);
+
+        relabel("deleting " + scope.display(path) + " (packed)");
+        const Scanner::ScannerRemoveResult removed = scanner.remove(path);
+        if (removed.failed) {
+            r.failed = true;
+            r.title = "Packed, but the folder is still there";
+            r.message = scope.display(packed.archive) + " is complete and checked, but " + scope.display(path)
+                      + " couldn't be deleted: " + removed.reason;
+            return r;
+        }
+
+        r.deleted.push_back(path);
+        r.message = "packed " + scope.display(path) + " into " + fs::path(packed.archive).filename().string() + ": "
+                  + FormatUtils::withSeparators(packed.entries) + " entries, now 1 file";
+        return r;
+    };
+
+    // Scanning folders again (R)
+    auto rescanAll = [&](const std::vector<std::string>& paths) {
+        JobResult r;
+        for (const auto& path : paths) {
+            if (quitting)
+                break;
+            relabel("scanning " + scope.display(path) + " again");
+            const Scanner::RescanResult done = scanner.rescan(path);
+            if (!done.message.empty())
+                r.message = done.failed ? done.message : "scanned again: " + done.message;
+        }
+        if (paths.size() > 1 && r.message.rfind("scanned again", 0) == 0)
+            r.message = "scanned your " + std::to_string(paths.size()) + " spaces again";
+        return r;
+    };
+
+    // What D and T ask before doing anything
+    BonsaiModalConfirm::Text confirm_text;
+    enum class Confirm { DELETE, PACK };
+    Confirm confirm_kind = Confirm::DELETE;
+    std::vector<std::string> confirm_paths;
+    int confirm_focus = 0;   // 0: cancel, 1: delete / pack
 
     auto confirm_modal = BonsaiModalConfirm::confirm(
         [&]() {
             show_confirm_modal = false;
-            if (confirm_path.empty() || deleting)
+            if (confirm_paths.empty())
                 return;
 
-            if (delete_thread.joinable())
-                delete_thread.join();
-
-            deleting = true;
-            deleting_label = scope.display(confirm_path);
-
-            delete_thread = std::thread([&, path = confirm_path] {
-                const Scanner::ScannerRemoveResult removed = scanner.remove(path);
-
-                // Back on the UI thread
-                screen.Post([&, removed] {
-                    deleting = false;
-                    result = removed;
-                    data->listing_version++;
-                    if (result.failed) {
-                        show_error_modal = true;
-                    } else {
-                        notice = "deleted " + deleting_label + (removed.reason.empty() ? "" : " (" + removed.reason + ")");
-                        notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-                        screen.PostEvent(Event::Custom);
-                    }
-
-                    {
-                        // Wake up both pie and menu on change
-                        std::lock_guard<std::mutex> lock(data->cv_mutex);
-                        data->menu_path_changed = true;
-                        data->pie_path_changed = true;
-                    }
-                    data->cv.notify_all();
-                });
-                screen.PostEvent(Event::Custom);
-            });
+            if (confirm_kind == Confirm::PACK) {
+                const std::string path = confirm_paths.front();
+                tar_stop = false;
+                startJob("packing " + scope.display(path), true, [&, path] { return packFolder(path); });
+            } else {
+                const std::vector<std::string> paths = confirm_paths;
+                const std::string label = paths.size() == 1 ? "deleting " + scope.display(paths.front()) : "deleting " + std::to_string(paths.size()) + " entries";
+                startJob(label, false, [&, paths] { return removeAll(paths); });
+            }
         },
         [&]{
             show_confirm_modal = false;
         },
-        &confirm_target,
+        &confirm_text,
         &confirm_focus
     );
 
@@ -328,7 +573,7 @@ int main(int argc, char* argv[]) {
         return false;
     });
 
-    auto error_modal = BonsaiModalError::error(result.reason,
+    auto error_modal = BonsaiModalError::error(&error_title, &error_message,
         [&show_error_modal](){
             show_error_modal = false;
         }
@@ -343,6 +588,78 @@ int main(int argc, char* argv[]) {
         return false;
     });
 
+    // "1.20 GiB on disk, 12.3k files" of a folder or a file (~: not final yet)
+    auto amountOf = [&](const std::string& path, bool is_dir, uint64_t& disk, uint64_t& files) {
+        if (is_dir) {
+            const Scanner::Totals totals = scanner.totals(path);
+            disk = totals.disk;
+            files = totals.inodes;
+            return !totals.final;
+        }
+
+        // fs::file_size() gives uintmax_t(-1) on error, shown as 17179869184 GiB
+        struct stat st;
+        disk = lstat(path.c_str(), &st) == 0 ? static_cast<uint64_t>(st.st_blocks) * 512 : 0;
+        files = 1;
+        return false;
+    };
+
+    // What the marked entries hold, for the line under the list: worked out when the marks change (it stats them)
+    std::string marks_line;
+    auto refreshMarks = [&] {
+        marks_line.clear();
+        if (data->marked.empty())
+            return;
+
+        uint64_t disk = 0, files = 0;
+        std::string previous;
+        for (const auto& path : data->marked) {
+            // Inside a marked folder: already in its totals
+            if (!previous.empty() && UserScope::isUnder(path, previous))
+                continue;
+            previous = path;
+
+            std::error_code ec;
+            uint64_t d = 0, f = 0;
+            amountOf(path, fs::is_directory(fs::symlink_status(path, ec)), d, f);
+            disk += d;
+            files += f;
+        }
+
+        marks_line = " " + std::to_string(data->marked.size()) + " marked: " + FormatUtils::toReadable(disk, " ") + ", "
+                   + FormatUtils::toCount(files) + " files  (D deletes, X clears)";
+    };
+    marks_changed = refreshMarks;
+
+    // The selected entry of the explorer (empty path for ".."), from the Menu's own index
+    struct Selection {
+        std::string path;
+        std::string label;
+        bool is_dir = false;
+    };
+    auto selection = [&]() {
+        Selection s;
+        std::lock_guard<std::mutex> lock(data->menu_mutex);
+        // The shared copy of the index may lag one list behind
+        if (selected >= 0 && selected < static_cast<int>(data->menu_entries->size())) {
+            const auto& entry = (*data->menu_entries)[selected];
+            s.path = entry.path;
+            s.label = entry.label;
+            s.is_dir = entry.is_dir;
+        }
+        return s;
+    };
+
+    // Asks the menu to select `label` in the list it makes next for `folder` (after F, S...)
+    auto keepSelection = [&]() {
+        std::lock_guard<std::mutex> lock(data->menu_mutex);
+        if (selected >= 0 && selected < static_cast<int>(data->menu_entries->size())) {
+            data->select_path = *data->path;
+            data->select_label = (*data->menu_entries)[selected].label;
+            data->select_generation = ++data->list_generation;
+        }
+    };
+
     /* Init menu:
     - Use a container to keep focus through the entire render.
       If a menu component is embeded in a slew of elements, it becomes static
@@ -350,57 +667,153 @@ int main(int argc, char* argv[]) {
     */
     MenuOption option;
 
-    auto menu_component = BonsaiMenu::menu(&screen, data, &scanner, &selected, &config.SIDEBAR_WIDTH, default_path, option);
-    menu_component = CatchEvent(menu_component, [&](Event event) {
+    auto menu_inner = BonsaiMenu::menu(&screen, data, &scanner, &selected, &config.SIDEBAR_WIDTH, default_path, option);
+    auto menu_component = CatchEvent(menu_inner, [&](Event event) {
         // Mac keyboards have no SUPPR key (their delete key is Backspace, which goes up a folder): D works everywhere
         if (event == Event::Delete || event == Event::Character('d') || event == Event::Character('D')) {
-            if (deleting)
+            if (job_running) {
+                say("wait: " + job_label + " first");
                 return true;
+            }
 
-            std::string path;
-            bool is_dir = false;
-            {
-                std::lock_guard<std::mutex> lock(data->menu_mutex);
-                // The Menu's own index: the shared copy may lag one list behind
-                if (selected >= 0 && selected < static_cast<int>(data->menu_entries->size())) {
-                    path = (*data->menu_entries)[selected].path;
-                    is_dir = (*data->menu_entries)[selected].is_dir;
+            // The marked entries, or the selected one; inside a marked folder is gone with it
+            std::vector<std::string> paths;
+            if (!data->marked.empty()) {
+                for (const auto& path : data->marked) {
+                    if (paths.empty() || !UserScope::isUnder(path, paths.back()))
+                        paths.push_back(path);
+                }
+            } else {
+                const Selection s = selection();
+                // ".." has no path
+                if (s.path.empty())
+                    return true;
+                paths.push_back(s.path);
+            }
+
+            // A whole space (all of home, all of scratch) is never one key away
+            for (const auto& path : paths) {
+                if (scope.isRoot(path)) {
+                    error_title = "Not deleted";
+                    error_message = scope.display(path) + " is one of your spaces: open it and delete what is inside instead.";
+                    show_error_modal = true;
+                    return true;
                 }
             }
 
-            // ".." has no path
-            if (path.empty())
-                return true;
-
-            // A whole space (all of home, all of scratch) is never one key away
-            if (scope.isRoot(path)) {
-                result = Scanner::ScannerRemoveResult{"This is one of your spaces: open it and delete what is inside instead.", true};
-                show_error_modal = true;
-                return true;
+            uint64_t disk = 0, files = 0;
+            bool about = false;
+            for (const auto& path : paths) {
+                std::error_code ec;
+                uint64_t d = 0, f = 0;
+                about |= amountOf(path, fs::is_directory(fs::symlink_status(path, ec)), d, f);
+                disk += d;
+                files += f;
             }
 
-            const Scanner::Totals totals = scanner.totals(path);
-            std::string amount;
-            if (is_dir) {
-                // "~": not final yet (from the previous scan, or still being scanned)
-                const std::string about = totals.final ? "" : "~";
-                amount = about + FormatUtils::toReadable(totals.disk, " ") + " on disk, " + about + FormatUtils::toCount(totals.inodes, " ") + " files";
-            } else {
-                // fs::file_size() gives uintmax_t(-1) on error, shown as 17179869184 GiB
-                struct stat st;
-                amount = lstat(path.c_str(), &st) == 0 ? FormatUtils::toReadable(static_cast<uint64_t>(st.st_blocks) * 512, " ") + " on disk" : "size unknown";
-            }
+            // "~": not final yet (from the previous scan, or still being scanned)
+            const std::string tilde = about ? "~" : "";
+            const std::string amount = "(" + tilde + FormatUtils::toReadable(disk, " ") + " on disk, " + tilde + FormatUtils::toCount(files, " ") + " files)";
 
-            // The path cut in its middle to the screen (its end, the name, stays), the size on its own line
+            // Paths cut in their middle to the screen (their end, the name, stays), the size on its own line
             const size_t room = static_cast<size_t>(std::max(20, std::min(ftxui::Terminal::Size().dimx, 100) - 8));
-            confirm_path = path;
-            confirm_target = FormatUtils::trimMiddle(scope.display(path), room) + "\n(" + amount + ")";
+            std::string target;
+            for (size_t i = 0; i < paths.size() && i < 6; i++)
+                target += FormatUtils::trimMiddle(scope.display(paths[i]), room) + "\n";
+            if (paths.size() > 6)
+                target += "... and " + std::to_string(paths.size() - 6) + " more\n";
+
+            confirm_kind = Confirm::DELETE;
+            confirm_paths = paths;
+            confirm_text.title = paths.size() == 1 ? "Delete this for good?" : "Delete these " + std::to_string(paths.size()) + " entries for good?";
+            confirm_text.target = target + amount;
+            confirm_text.warning = "ROMEO has no backups: this can't be undone.";
+            confirm_text.button = "delete";
             confirm_focus = 0;
             show_confirm_modal = true;
             return true;
         }
 
-        if(event == Event::Backspace || event == Event::Escape) {
+        // Thousands of files become one: the file quota counts one file per entry
+        if (event == Event::Character('t') || event == Event::Character('T')) {
+            if (job_running) {
+                say("wait: " + job_label + " first");
+                return true;
+            }
+
+            const Selection s = selection();
+            if (s.path.empty() || !s.is_dir) {
+                say("T packs a folder: select one");
+                return true;
+            }
+            if (scope.isRoot(s.path) || !scope.owns(s.path) || scope.relation(s.path) != UserScope::Relation::INSIDE) {
+                say("only a folder of yours inside a space can be packed");
+                return true;
+            }
+
+            uint64_t disk = 0, files = 0;
+            const std::string tilde = amountOf(s.path, true, disk, files) ? "~" : "";
+            const std::string archive = fs::path(Archive::archiveName(s.path)).filename().string();
+            const size_t room = static_cast<size_t>(std::max(20, std::min(ftxui::Terminal::Size().dimx, 100) - 8));
+
+            confirm_kind = Confirm::PACK;
+            confirm_paths = {s.path};
+            confirm_text.title = "Pack this folder into one file?";
+            confirm_text.target = FormatUtils::trimMiddle(scope.display(s.path), room) + "\ninto " + archive + " next to it\n("
+                                + tilde + FormatUtils::withSeparators(files) + " files, " + tilde + FormatUtils::toReadable(disk, " ") + " on disk)";
+            confirm_text.warning = "It is deleted once the archive is checked: needs " + tilde + FormatUtils::toReadable(disk, " ") + " more space until then.";
+            confirm_text.button = "pack";
+            confirm_focus = 0;
+            show_confirm_modal = true;
+            return true;
+        }
+
+        // Marks: SPACE on an entry, then D deletes them all at once
+        if (event == Event::Character(' ')) {
+            const Selection s = selection();
+            if (s.path.empty())
+                return true;
+            if (scope.isRoot(s.path)) {
+                say("a whole space can't be marked: open it");
+                return true;
+            }
+
+            if (!data->marked.erase(s.path))
+                data->marked.insert(s.path);
+            refreshMarks();
+
+            // On to the next entry, as in most file managers
+            menu_inner->OnEvent(Event::ArrowDown);
+            return true;
+        }
+
+        // The path, for a shell: ~ written out, so it works between quotes too
+        if (event == Event::Character('y') || event == Event::Character('Y')) {
+            const Selection s = selection();
+            std::string path = s.path.empty() ? *data->path : s.path;
+            if (scanner.isSpacesView(path)) {
+                say("select something to copy its path");
+                return true;
+            }
+
+            std::string shown = scope.display(path);
+            if (shown == "~" || shown.rfind("~/", 0) == 0)
+                shown = home.string() + shown.substr(1);
+
+            copyToClipboard(shown);
+            say("copied " + shown);
+            return true;
+        }
+
+        // Vim keys: j and k (and PgUp, PgDn, Home, End) are the Menu's own
+        if (event == Event::Character('l'))
+            return menu_inner->OnEvent(Event::Return);
+        if (event == Event::Character('g'))
+            return menu_inner->OnEvent(Event::Home);
+        if (event == Event::Character('G'))
+            return menu_inner->OnEvent(Event::End);
+
+        if(event == Event::Backspace || event == Event::Escape || event == Event::Character('h')) {
             std::string new_path;
             {
                 std::lock_guard<std::mutex> lock(data->menu_mutex);
@@ -426,14 +839,7 @@ int main(int argc, char* argv[]) {
                 data->select_generation = ++data->list_generation;
             }
 
-            {
-                // Wake up both pie and menu on change
-                std::lock_guard<std::mutex> lock(data->cv_mutex);
-                data->menu_path_changed = true;
-                data->pie_path_changed = true;
-            }
-
-            data->cv.notify_all();
+            wake();
             return true;
         }
 
@@ -456,46 +862,88 @@ int main(int argc, char* argv[]) {
         std::lock_guard<std::mutex> lock_m(data->menu_mutex);
 
         const Scanner::Metric metric = scanner.getMetric();
+        const AppData::Sort sort = data->sort.load();
 
-        // Where the explorer is, the way the user knows it
+        // Where the explorer is, the way the user knows it; or what runs in the background
         const bool noticing = !notice.empty() && std::chrono::steady_clock::now() < notice_until;
-        const std::string here = deleting ? "deleting " + deleting_label + "..."
+        std::string busy;
+        if (job_running) {
+            busy = job_label + "...";
+            if (const uint64_t total = job_total.load(); total > 0)
+                busy += " " + FormatUtils::toCount(std::min(job_done.load(), total)) + "/" + FormatUtils::toCount(total);
+        }
+        const std::string here = job_running ? busy
                                : noticing ? notice
                                : scanner.isSpacesView(*data->path) ? "your spaces" : scope.display(*data->path);
         const size_t here_width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
-        const char* metric_label = metric == Scanner::Metric::INODES ? " [files]" : (metric == Scanner::Metric::DISK ? " [disk]" : " [size]");
+        const char* metric_label = metric == Scanner::Metric::INODES ? " [files" : (metric == Scanner::Metric::DISK ? " [disk" : " [size");
+        const char* sort_label = sort == AppData::Sort::NAME ? ", by name]" : sort == AppData::Sort::AGE ? ", oldest first]" : "]";
 
-        return vbox({
+        Elements bottom;
+
+        // Marked entries (SPACE): what D would delete
+        if (!marks_line.empty())
+            bottom.push_back(text(marks_line) | color(Color::RGB(255, 215, 0)));
+
+        // Folders that couldn't be read: the sizes above them may be low
+        if (const uint32_t errors = scanner.readErrorCount(); errors > 0) {
+            bottom.push_back(text(" ! " + std::to_string(errors) + (errors == 1 ? " folder" : " folders") + " couldn't be read (! to see)")
+                             | color(Color::RGB(255, 140, 0)));
+        }
+
+        bottom.push_back(separator());
+        bottom.push_back(text(" F size  S order  A age  / find") | color(Color::GrayDark));
+        bottom.push_back(text(" C clean  U quota  W grew  ? keys") | color(Color::GrayDark));
+        bottom.push_back(text(" SPACE mark  D delete  T pack  Q quit") | color(Color::GrayDark));
+
+        Elements rows = {
             text(" "),
             hbox({
                 text("Explorer") | bold,
-                text(metric_label) | color(Color::GrayDark),
+                text(std::string(metric_label) + sort_label) | color(Color::GrayDark),
                 text(" "),
                 BonsaiQuotaView::badge(quotas.get(), quotas.ready()),
             }) | center,
-            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(deleting ? Color::RGB(255, 140, 0) : noticing ? Color::RGB(60, 179, 113) : Color::GrayLight),
+            text(" " + FormatUtils::trimMiddle(here, here_width)) | color(job_running ? Color::RGB(255, 140, 0) : noticing ? Color::RGB(60, 179, 113) : Color::GrayLight),
             separator(),
             hbox({
                 menu_component->Render() | frame | flex,
                 text(" ")
             }) | flex,
-            separator(),
-            text(" F size  C clean  / find  U quota") | color(Color::GrayDark),
-            text(" D delete  Q quit") | color(Color::GrayDark),
-        });
+        };
+        rows.insert(rows.end(), bottom.begin(), bottom.end());
+
+        return vbox(std::move(rows));
     });
 
     // Right side: the pie chart, or the quotas
     auto right = Renderer(pie_component, [&] {
         if (show_quota)
-            return BonsaiQuotaView::render(quotas.get(), quotas.ready(), ftxui::Terminal::Size().dimx - config.SIDEBAR_WIDTH - 1);
+            return BonsaiQuotaView::render(quotas.get(), quotas.ready(), ftxui::Terminal::Size().dimx - config.SIDEBAR_WIDTH - 1,
+                                           scanner.getScope(), [&scanner](const std::string& root) { return scanner.totals(root); });
 
         return pie_component->Render();
     });
 
     auto window = ResizableSplitLeft(left, right, &config.SIDEBAR_WIDTH);
 
-    /* Opening a path in the explorer (from the cleanup or the search window)
+    // Opens `folder` itself in the explorer, at its first entry (never above where the explorer starts)
+    auto open_folder = [&](const std::string& folder) {
+        if (!UserScope::isUnder(folder, default_path.native()))
+            return false;
+
+        {
+            std::lock_guard<std::mutex> lock(data->menu_mutex);
+            *data->path = folder;
+            data->select_path = folder;
+            data->select_label.clear();
+            data->select_generation = ++data->list_generation;
+        }
+        wake();
+        return true;
+    };
+
+    /* Opening a path in the explorer (from the cleanup, search, growth or errors window)
     - Goes to its folder with it selected, so ENTER opens it and D deletes it
     */
     auto open_in_explorer = [&](const std::string& path) {
@@ -523,13 +971,7 @@ int main(int argc, char* argv[]) {
             data->select_generation = ++data->list_generation;
         }
 
-        {
-            std::lock_guard<std::mutex> lock(data->cv_mutex);
-            data->menu_path_changed = true;
-            data->pie_path_changed = true;
-        }
-        data->cv.notify_all();
-
+        wake();
         show_quota = false;
     };
 
@@ -544,6 +986,28 @@ int main(int argc, char* argv[]) {
         },
         [&] { show_cleanup = false; });
 
+    // What grew since the previous scan (key W), worked out on its own thread too
+    auto growth_state = std::make_shared<BonsaiGrowth::State>();
+    std::thread growth_thread;
+    std::atomic<bool> growth_running{false};
+    auto growth_component = BonsaiGrowth::window(growth_state, &scanner,
+        [&](const std::string& path) {
+            open_in_explorer(path);
+            show_growth = false;
+        },
+        [&] { show_growth = false; });
+
+    // Folders that couldn't be read (key !)
+    auto errors_state = std::make_shared<BonsaiErrors::State>();
+    auto errors_component = BonsaiErrors::window(errors_state, &scanner.getScope(),
+        [&](const std::string& path) {
+            open_in_explorer(path);
+            show_errors = false;
+        },
+        [&] { show_errors = false; });
+
+    auto help_component = BonsaiHelp::window([&] { show_help = false; });
+
     // Folder search (key /), searched on its own thread
     auto search_state = std::make_shared<BonsaiSearch::State>();
     BonsaiSearch::Worker search_worker(search_state, &scanner, [&screen] { screen.PostEvent(Event::Custom); });
@@ -557,9 +1021,14 @@ int main(int argc, char* argv[]) {
     window |= Modal(confirm_modal, &show_confirm_modal);
     window |= Modal(error_modal, &show_error_modal);
     window |= Modal(cleanup_component, &show_cleanup);
+    window |= Modal(growth_component, &show_growth);
+    window |= Modal(errors_component, &show_errors);
+    window |= Modal(help_component, &show_help);
     window |= Modal(search_component, &show_search);
 
-    auto modal_open = [&] { return show_confirm_modal || show_error_modal || show_cleanup || show_search; };
+    auto modal_open = [&] {
+        return show_confirm_modal || show_error_modal || show_cleanup || show_search || show_help || show_growth || show_errors;
+    };
 
     // Quit with q, allow sidebar resize with arrow keys
     auto app = CatchEvent(window, [&](Event event) {
@@ -575,14 +1044,63 @@ int main(int argc, char* argv[]) {
             return true;
         }
 
+        if (event == Event::Character('?') && !modal_open()) {
+            show_help = true;
+            return true;
+        }
+
         if ((event == Event::Character('u') || event == Event::Character('U')) && !modal_open()) {
             show_quota = !show_quota;
             if (show_quota) quotas.refresh();
             return true;
         }
 
+        // In the quota view: a card's number opens its space, showing what fills it most
+        if (show_quota && !modal_open() && event.is_character() && event.character().size() == 1
+            && event.character()[0] >= '1' && event.character()[0] <= '9') {
+            const auto targets = BonsaiQuotaView::targets(quotas.get(), scanner.getScope());
+            const size_t index = static_cast<size_t>(event.character()[0] - '1');
+            if (index >= targets.size())
+                return true;
+
+            if (!open_folder(targets[index].root)) {
+                say("that space is above where the explorer started");
+                return true;
+            }
+
+            scanner.setMetric(targets[index].files ? Scanner::Metric::INODES : Scanner::Metric::DISK);
+            data->sort = AppData::Sort::SIZE;
+            show_quota = false;
+            say(targets[index].files ? "biggest by files: the file quota" : "biggest on disk: the space quota");
+            return true;
+        }
+
+        // R: the quotas again in the quota view, otherwise the folder shown scanned again
         if ((event == Event::Character('r') || event == Event::Character('R')) && !modal_open()) {
-            quotas.refresh();
+            if (show_quota) {
+                quotas.refresh();
+                return true;
+            }
+
+            std::string shown;
+            {
+                std::lock_guard<std::mutex> lock(data->menu_mutex);
+                shown = *data->path;
+            }
+
+            std::vector<std::string> paths;
+            if (scanner.isSpacesView(shown))
+                paths = scope.roots;
+            else if (scope.relation(shown) == UserScope::Relation::INSIDE)
+                paths = {shown};
+
+            if (paths.empty()) {
+                say("open a space to scan it again");
+                return true;
+            }
+
+            startJob(paths.size() > 1 ? "scanning your spaces again" : "scanning " + scope.display(shown) + " again", true,
+                     [&, paths] { return rescanAll(paths); });
             return true;
         }
 
@@ -614,6 +1132,52 @@ int main(int argc, char* argv[]) {
             return true;
         }
 
+        if ((event == Event::Character('w') || event == Event::Character('W')) && !modal_open()) {
+            show_growth = true;
+
+            if (growth_running)
+                return true;
+            if (growth_thread.joinable())
+                growth_thread.join();
+
+            growth_state->computing = true;
+            growth_running = true;
+            growth_thread = std::thread([&] {
+                auto items = std::make_shared<std::vector<Scanner::GrowthItem>>(scanner.growth(200));
+                const bool partial = !scanner.isDone();
+                const bool files = scanner.getMetric() == Scanner::Metric::INODES;
+                const int64_t since = scanner.previousScan();
+
+                screen.Post([&, items, partial, files, since] {
+                    BonsaiGrowth::set(*growth_state, std::move(*items), partial, files, since);
+                });
+                screen.PostEvent(Event::Custom);
+                growth_running = false;
+            });
+            return true;
+        }
+
+        if (event == Event::Character('!') && !modal_open()) {
+            const uint32_t count = scanner.readErrorCount();
+            if (count == 0) {
+                say("every folder could be read");
+                return true;
+            }
+
+            BonsaiErrors::set(*errors_state, scanner.readErrors(500), count);
+            show_errors = true;
+            return true;
+        }
+
+        if ((event == Event::Character('x') || event == Event::Character('X')) && !modal_open()) {
+            if (!data->marked.empty()) {
+                data->marked.clear();
+                refreshMarks();
+                say("marks cleared");
+            }
+            return true;
+        }
+
         // Size, size on disk, file count: the menu and the pie are listed again with the next metric
         if ((event == Event::Character('f') || event == Event::Character('F')) && !modal_open()) {
             const Scanner::Metric metric = scanner.getMetric();
@@ -621,22 +1185,27 @@ int main(int argc, char* argv[]) {
                             : metric == Scanner::Metric::DISK ? Scanner::Metric::INODES : Scanner::Metric::BYTES);
 
             // The list is sorted again: the same entry stays selected (looked up in the new list)
-            {
-                std::lock_guard<std::mutex> lock(data->menu_mutex);
-                if (selected >= 0 && selected < static_cast<int>(data->menu_entries->size())) {
-                    data->select_path = *data->path;
-                    data->select_label = (*data->menu_entries)[selected].label;
-                    data->select_generation = ++data->list_generation;
-                }
-            }
+            keepSelection();
+            wake();
+            return true;
+        }
 
-            {
-                std::lock_guard<std::mutex> lock(data->cv_mutex);
-                data->menu_path_changed = true;
-                data->pie_path_changed = true;
-            }
+        // Order: size (of what F shows), name, oldest change first (the age column comes with it)
+        if ((event == Event::Character('s') || event == Event::Character('S')) && !modal_open()) {
+            const AppData::Sort sort = data->sort.load();
+            const AppData::Sort next = sort == AppData::Sort::SIZE ? AppData::Sort::NAME
+                                     : sort == AppData::Sort::NAME ? AppData::Sort::AGE : AppData::Sort::SIZE;
+            data->sort = next;
+            if (next == AppData::Sort::AGE)
+                data->show_age = true;
 
-            data->cv.notify_all();
+            keepSelection();
+            wake();
+            return true;
+        }
+
+        if ((event == Event::Character('a') || event == Event::Character('A')) && !modal_open()) {
+            data->show_age = !data->show_age;
             return true;
         }
 
@@ -710,11 +1279,23 @@ int main(int argc, char* argv[]) {
 
     if (cleanup_thread.joinable())
         cleanup_thread.join();
+    if (growth_thread.joinable())
+        growth_thread.join();
 
-    if (delete_thread.joinable()) {
-        if (deleting)
-            std::cerr << "Waiting for the deletion of " << deleting_label << " to finish..." << std::endl;
-        delete_thread.join();
+    /* What still runs in the background
+    - Packing or scanning again: stopped (the folder stays as it was, the .part is removed)
+    - Deleting: waited for (it doesn't stop midway); a scan again it does after it stops
+    */
+    quitting = true;
+    tar_stop = true;
+    if (const pid_t child = tar_child.load(); child > 0)
+        kill(child, SIGTERM);
+    scanner.stop();
+
+    if (job_thread.joinable()) {
+        if (job_running && !job_stoppable)
+            std::cerr << "Waiting for " << job_label << " to finish..." << std::endl;
+        job_thread.join();
     }
 
 

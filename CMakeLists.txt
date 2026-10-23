@@ -24,12 +24,16 @@ set(SRC
     src/main.cpp
 
     src/core/app_data.cpp
+    src/core/archive.cpp
     src/core/dir_tree.cpp
     src/core/scanner.cpp
     src/core/quota.cpp
     src/core/walker.cpp
 
     src/ui/cleanup_view.cpp
+    src/ui/errors_view.cpp
+    src/ui/growth_view.cpp
+    src/ui/help_view.cpp
     src/ui/menu.cpp
     src/ui/modal_confirm.cpp
     src/ui/modal_error.cpp

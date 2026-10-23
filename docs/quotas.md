@@ -15,6 +15,8 @@ Files you put in a project folder must belong to the project group. Files left w
 
 Quotas count blocks on disk. In the explorer, `F` switches to the size on disk, which matches them.
 
+In the quota view (`U`), the cards of your spaces are numbered: `1` to `9` opens that space in the explorer, sorted by what fills it most. Over a soft limit, the card says how much to remove. When the file quota is the problem, the cleanup view (`C`) lists the folders holding many files, and `T` packs one into a single `.tar`.
+
 ![Quota view](../img/quotas.png)
 
 Example of `bonsai-romeo --quota` (`|` marks the soft limit, the end of the bar the hard limit):
@@ -29,6 +31,7 @@ home - user - /home/user
 scratch - user - /scratch_p/user
   Space [###################...........|.]  58%  61.20 GiB / 100.00 GiB  (hard 105.00 GiB)  38.80 GiB left
   Files [#####################|##........]  74%  1 120 004 / 1 000 000  (hard 1 500 000)  grace: 4 days left
+        remove 120 004 files to get under the soft limit
 ```
 
 Quotas are read with `mmlsquota`, following the same rules as ROMEO's `/apps/romeotools/myquotas.sh`.

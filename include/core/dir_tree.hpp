@@ -10,6 +10,8 @@ Explanation:
     - Sizes are atomics: scanner threads add to them, UI threads read them, nobody takes a lock.
 - A node's size is the total of its whole subtree. It grows while the scan is running.
 - A node is complete once it and everything below it was scanned: its totals are then final.
+- A directory that couldn't be read completely (I/O error, no permission on a folder of the user's)
+  is marked, and so is every directory above it: their totals may be too low.
 */
 
 #pragma once
@@ -54,6 +56,8 @@ public:
         std::atomic<const Block*> children{nullptr}; // nullptr: not listed yet, or no sub-directories
         uint32_t parent = NONE;
         std::atomic<bool> removed{false};
+        std::atomic<int16_t> error{0};            // errno of a failed read of this directory (0: none)
+        std::atomic<bool> error_below{false};     // This directory, or one below it, couldn't be read completely
     };
 
     // What one directory adds to itself and to every directory above it
@@ -91,6 +95,10 @@ public:
     */
     void listed(uint32_t dir, uint32_t subdirs);
 
+    // `dir` couldn't be read completely (`error`: errno). The first error of a directory is kept.
+    void markError(uint32_t dir, int error);
+    uint32_t errors() const { return error_count.load(std::memory_order_relaxed); }
+
     // Resolves an absolute path to its node, or NONE if it isn't a (known) directory under the root.
     uint32_t find(std::string_view path) const;
 
@@ -118,6 +126,7 @@ private:
 
     std::atomic<Node*> chunks[MAX_CHUNKS] = {};
     std::atomic<uint64_t> next_id{1};
+    std::atomic<uint32_t> error_count{0};
     std::mutex chunk_mutex;
 
     std::string root; // Without trailing slash, so "/" is stored as ""

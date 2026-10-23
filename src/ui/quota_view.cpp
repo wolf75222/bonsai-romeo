@@ -1,6 +1,7 @@
 #include "../../include/ui/quota_view.hpp"
 
 #include "../../include/utils/format.hpp"
+#include "../../include/utils/json.hpp"
 
 #include <algorithm>
 #include <iomanip>
@@ -87,6 +88,13 @@ Element gauge(const Quota::Limit& limit, int bar_width) {
     return hbox(std::move(cells));
 }
 
+// Over the soft limit: how much has to go
+std::string need(const Quota::Limit& limit, bool bytes) {
+    if (limit.soft == 0 || limit.used <= limit.soft)
+        return "";
+    return "remove " + value(limit.used - limit.soft, bytes) + (bytes ? "" : " files") + " to get under the soft limit";
+}
+
 // What is said right of a gauge: what's left, or the grace period
 std::string rightText(const Quota::Limit& limit, bool bytes) {
     const std::string grace = graceText(limit);
@@ -139,13 +147,39 @@ Element line(const std::string& label, const Quota::Limit& limit, bool bytes, co
         text(" "),
     });
 
-    if (l.one_line)
-        return first;
+    Elements lines = {first};
+    if (!l.one_line)
+        lines.push_back(hbox({text("") | size(WIDTH, EQUAL, LABEL_WIDTH), text(amounts(limit, bytes)) | color(Color::GrayLight)}));
 
-    return vbox({
-        first,
-        hbox({text("") | size(WIDTH, EQUAL, LABEL_WIDTH), text(amounts(limit, bytes)) | color(Color::GrayLight)}),
-    });
+    if (const std::string over = need(limit, bytes); !over.empty())
+        lines.push_back(hbox({text("") | size(WIDTH, EQUAL, LABEL_WIDTH), text(over) | bold | color(c)}));
+
+    return vbox(std::move(lines));
+}
+
+const char* jsonState(Quota::State s) {
+    switch (s) {
+        case Quota::State::OK:       return "ok";
+        case Quota::State::NO_LIMIT: return "no_limit";
+        case Quota::State::NOTICE:   return "notice";
+        case Quota::State::GRACE:    return "grace";
+        case Quota::State::EXPIRED:  return "expired";
+        case Quota::State::HARD:     return "hard";
+    }
+    return "";
+}
+
+std::string jsonLimit(const Quota::Limit& limit) {
+    return "{\"used\": " + std::to_string(limit.used) + ", \"soft\": " + std::to_string(limit.soft) + ", \"hard\": "
+         + std::to_string(limit.hard) + ", \"grace\": " + Json::str(limit.grace) + ", \"state\": \"" + jsonState(limit.state()) + "\"}";
+}
+
+// "12.3 GiB (7%)": a part of a total
+std::string share(uint64_t part, uint64_t total, bool bytes) {
+    std::string out = bytes ? FormatUtils::toReadable(part, " ") : FormatUtils::withSeparators(part) + " files";
+    if (total > 0)
+        out += " (" + std::to_string(static_cast<int>(std::min(100.0, 100.0 * static_cast<double>(part) / static_cast<double>(total)))) + "%)";
+    return out;
 }
 
 std::string title(const Quota::Row& row) {
@@ -193,7 +227,29 @@ Element BonsaiQuotaView::badge(const Quota::Report& report, bool ready) {
     return text(label) | bold | color(Color::Black) | bgcolor(stateColor(worst >= Quota::State::NOTICE ? worst : Quota::State::NOTICE));
 }
 
-Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int width) {
+std::vector<BonsaiQuotaView::Target> BonsaiQuotaView::targets(const Quota::Report& report, const UserScope& scope) {
+    std::vector<Target> out;
+
+    for (size_t i = 0; i < report.rows.size() && out.size() < 9; i++) {
+        const Quota::Row& row = report.rows[i];
+        if (!row.space.limited() && !row.inodes.limited())
+            continue;
+
+        // The space of this quota, by the path the user knows it by (/home/<user> is shown as ~)
+        for (const auto& root : scope.roots) {
+            const std::string shown = scope.display(root);
+            if (shown == row.path || (!row.group && row.fileset == "home" && shown == "~")) {
+                out.push_back(Target{i, root, row.inodes.ratio() > row.space.ratio()});
+                break;
+            }
+        }
+    }
+
+    return out;
+}
+
+Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int width, const UserScope& scope,
+                                const std::function<Scanner::Totals(const std::string&)>& mine) {
     // Inside a card: minus its two borders
     const Layout gauges = layout(report, std::max(width - 2, 20));
 
@@ -208,7 +264,7 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
     content.push_back(hbox({
         text(" Quotas GPFS") | bold,
         filler(),
-        text("updated " + ago(report) + " - R refresh - U back to chart ") | color(Color::GrayDark),
+        text("updated " + ago(report) + " - R refresh - 1-9 open - U back to chart ") | color(Color::GrayDark),
     }));
     content.push_back(text(" " + summary(report)) | bold | color(stateColor(report.worst() == Quota::State::NO_LIMIT ? Quota::State::OK : report.worst())));
     content.push_back(text(" "));
@@ -220,7 +276,10 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
         content.push_back(window(text(" Files outside of the project quota ") | bold | color(stateColor(Quota::State::GRACE)), vbox(std::move(lines))));
     }
 
-    for (const auto& row : report.rows) {
+    const std::vector<Target> numbered = targets(report, scope);
+
+    for (size_t i = 0; i < report.rows.size(); i++) {
+        const Quota::Row& row = report.rows[i];
         if (!row.space.limited() && !row.inodes.limited()) {
             // The user quota on projet: counted on the project groups instead
             content.push_back(window(text(" " + title(row) + " "), vbox({
@@ -231,10 +290,26 @@ Element BonsaiQuotaView::render(const Quota::Report& report, bool ready, int wid
         }
 
         const Color c = stateColor(row.state());
-        content.push_back(window(text(" " + title(row) + " ") | bold | color(c), vbox({
+        const auto target = std::find_if(numbered.begin(), numbered.end(), [i](const Target& t) { return t.row == i; });
+        const std::string key = target != numbered.end() ? "[" + std::to_string(target - numbered.begin() + 1) + "] " : "";
+
+        Elements lines = {
             line("Space", row.space, true, gauges),
             line("Files", row.inodes, false, gauges),
-        })));
+        };
+
+        // In a project: what of it is the user's (from the scan; ~ while it runs)
+        if (row.group && target != numbered.end()) {
+            const Scanner::Totals t = mine(target->root);
+            if (t.known) {
+                const std::string about = t.final ? "" : "~";
+                lines.push_back(hbox({text("") | size(WIDTH, EQUAL, LABEL_WIDTH),
+                                      text("yours: " + about + share(t.disk, row.space.used, true) + ", " + about + share(t.inodes, row.inodes.used, false))
+                                      | color(Color::GrayLight)}));
+            }
+        }
+
+        content.push_back(window(text(" " + key + title(row) + " ") | bold | color(c), vbox(std::move(lines))));
     }
 
 
@@ -294,6 +369,9 @@ std::string BonsaiQuotaView::toText(const Quota::Report& report, bool color) {
             out << "  " << std::left << std::setw(6) << (bytes ? "Space" : "Files") << bar(limit) << " "
                 << std::right << std::setw(4) << percent(limit) << "  " << amounts(limit, bytes) << "  "
                 << (color && !grace.empty() ? ansi(limit.state()) : "") << (grace.empty() ? left(limit, bytes) : grace) << reset << "\n";
+
+            if (const std::string over = need(limit, bytes); !over.empty())
+                out << "        " << (color ? ansi(limit.state()) : "") << over << reset << "\n";
         }
         out << "\n";
     }
@@ -305,5 +383,24 @@ std::string BonsaiQuotaView::toText(const Quota::Report& report, bool color) {
     }
 
     out << "| = soft limit (grace period, then writing blocked) - bar end = hard limit - files = inodes\n";
+    return out.str();
+}
+
+std::string BonsaiQuotaView::toJson(const Quota::Report& report) {
+    std::ostringstream out;
+    out << "{\"rows\": [";
+    for (size_t i = 0; i < report.rows.size(); i++) {
+        const Quota::Row& row = report.rows[i];
+        out << (i ? ",\n  " : "\n  ") << "{\"name\": " << Json::str(row.name) << ", \"fileset\": " << Json::str(row.fileset)
+            << ", \"path\": " << Json::str(row.path) << ", \"group\": " << (row.group ? "true" : "false")
+            << ", \"state\": \"" << jsonState(row.state()) << "\", \"space\": " << jsonLimit(row.space)
+            << ", \"files\": " << jsonLimit(row.inodes) << "}";
+    }
+    out << "\n],\n\"stray\": ";
+    if (report.stray_group.empty())
+        out << "null";
+    else
+        out << "{\"group\": " << Json::str(report.stray_group) << ", \"bytes\": " << report.stray_bytes << ", \"files\": " << report.stray_inodes << "}";
+    out << ",\n\"error\": " << (report.error.empty() ? "null" : Json::str(report.error)) << "}\n";
     return out.str();
 }

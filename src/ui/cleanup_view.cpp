@@ -1,6 +1,9 @@
 #include "../../include/ui/cleanup_view.hpp"
 
 #include "../../include/utils/format.hpp"
+#include "../../include/utils/json.hpp"
+
+#include "../../include/ui/focus.hpp"
 
 #include <ftxui/component/event.hpp>
 #include <ftxui/dom/elements.hpp>
@@ -15,23 +18,35 @@ using namespace ftxui;
 namespace {
 
 // TAB cycles through them
-const char* FILTERS[] = {"all", "caches and builds", "old data", "files"};
-constexpr int FILTER_COUNT = 4;
+const char* FILTERS[] = {"all", "caches and builds", "old data", "many files", "files"};
+constexpr int FILTER_COUNT = 5;
 
 bool keeps(int filter, const Scanner::CleanupItem& item) {
     switch (filter) {
-        case 1: return !item.is_file && item.kind != "old data";
+        case 1: return !item.is_file && item.kind != "old data" && item.kind != "many files";
         case 2: return item.kind == "old data";
-        case 3: return item.is_file;
+        case 3: return item.kind == "many files";
+        case 4: return item.is_file;
         default: return true;
     }
 }
 
 Color kindColor(const std::string& kind) {
     if (kind == "old data")   return Color::RGB(255, 140, 0);
+    if (kind == "many files") return Color::RGB(186, 85, 211);
     if (kind == "core dump")  return Color::RGB(255, 70, 70);
     if (kind == "large file") return Color::RGB(30, 144, 255);
     return Color::RGB(60, 179, 113);
+}
+
+// "12 entries, 3.40 GiB on disk, 120k files"
+std::string summary(const std::vector<Scanner::CleanupItem>& items) {
+    uint64_t disk = 0, files = 0;
+    for (const auto& item : items) {
+        disk += item.disk;
+        files += item.inodes;
+    }
+    return std::to_string(items.size()) + " entries, " + FormatUtils::toReadable(disk, " ") + " on disk, " + FormatUtils::toCount(files) + " files";
 }
 
 // Room left for the path: the window is at most 120 columns, minus borders and the other columns
@@ -66,12 +81,8 @@ void BonsaiCleanup::apply(State& state) {
 std::string BonsaiCleanup::toText(const std::vector<Scanner::CleanupItem>& items, const UserScope& scope, size_t max_items) {
     std::ostringstream out;
     const int64_t now = std::time(nullptr);
-    uint64_t total = 0;
 
-    for (const auto& item : items)
-        total += item.disk;
-
-    out << "Cleanup suggestions: " << items.size() << " entries, " << FormatUtils::toReadable(total, " ") << " on disk\n\n";
+    out << "Cleanup suggestions: " << summary(items) << "\n\n";
     out << "  Size   Files  Changed  Kind            Path\n";
 
     for (size_t i = 0; i < items.size() && i < max_items; i++) {
@@ -86,6 +97,20 @@ std::string BonsaiCleanup::toText(const std::vector<Scanner::CleanupItem>& items
     if (items.size() > max_items)
         out << "  ... and " << items.size() - max_items << " more (bonsai-romeo, key C)\n";
 
+    return out.str();
+}
+
+std::string BonsaiCleanup::toJson(const std::vector<Scanner::CleanupItem>& items, const UserScope& scope) {
+    std::ostringstream out;
+    out << "{\"items\": [";
+    for (size_t i = 0; i < items.size(); i++) {
+        const auto& item = items[i];
+        out << (i ? ",\n  " : "\n  ") << "{\"path\": " << Json::str(item.path) << ", \"shown\": " << Json::str(scope.display(item.path))
+            << ", \"kind\": " << Json::str(item.kind) << ", \"hint\": " << Json::str(item.hint)
+            << ", \"disk\": " << item.disk << ", \"files\": " << item.inodes << ", \"newest\": " << item.newest
+            << ", \"is_file\": " << (item.is_file ? "true" : "false") << "}";
+    }
+    out << "\n]}\n";
     return out.str();
 }
 
@@ -121,14 +146,10 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
     auto menu = Menu(&state->labels, &state->selected, option);
 
     auto view = Renderer(menu, [state, menu] {
-        uint64_t total = 0;
-        for (const auto& item : state->items)
-            total += item.disk;
-
         Element list = state->computing
             ? text(" Looking for what could be cleaned...") | color(Color::GrayLight)
             : state->items.empty()
-            ? text(" Nothing to suggest: no cache, build folder, old data or large file found.") | color(Color::GrayLight)
+            ? text(" Nothing to suggest: no cache, build folder, old data, folder of many files or large file found.") | color(Color::GrayLight)
             : menu->Render() | vscroll_indicator | frame | size(HEIGHT, LESS_THAN, 20);
 
         std::string hint;
@@ -138,9 +159,9 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
         return vbox({
             hbox({
                 text(" Cleanup suggestions ") | bold,
-                text("[" + std::string(FILTERS[state->filter]) + "]") | color(Color::GrayLight),
+                text("[" + std::string(FILTERS[state->filter]) + "]  ") | color(Color::GrayLight),
                 filler(),
-                text(std::to_string(state->items.size()) + " entries, " + FormatUtils::toReadable(total, " ") + " on disk ") | color(Color::GrayLight),
+                text(summary(state->items) + " ") | color(Color::GrayLight),
             }),
             state->partial ? text(" The scan is still running: more may show up, sizes may grow") | color(Color::RGB(255, 215, 0)) : emptyElement(),
             separator(),
@@ -158,7 +179,7 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
         }) | border | size(WIDTH, LESS_THAN, 120);
     });
 
-    return CatchEvent(view, [state, on_close](Event event) {
+    return keepFocus(CatchEvent(view, [state, on_close](Event event) {
         if (event == Event::Escape || event == Event::Character('c') || event == Event::Character('C')) {
             on_close();
             return true;
@@ -171,5 +192,5 @@ Component BonsaiCleanup::window(std::shared_ptr<State> state, const UserScope* s
         }
 
         return false;
-    });
+    }));
 }

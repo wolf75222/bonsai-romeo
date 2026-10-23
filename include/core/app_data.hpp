@@ -7,8 +7,11 @@
 #include <ftxui/screen/color.hpp>
 #include <atomic>
 #include <condition_variable>
-#include <vector>
+#include <memory>
 #include <mutex>
+#include <set>
+#include <string>
+#include <vector>
 
 using namespace ftxui;
 
@@ -31,7 +34,12 @@ public:
         bool is_dir;
         bool final = true;   // false: from the previous scan, or still being scanned (shown with ~)
         bool known = true;   // false: not in the scan, made after it or not reached yet (shown as ?)
+        bool error = false;  // A folder in it couldn't be read: the size may be too low (shown with !)
+        int64_t newest = 0;  // Last modification in it (seconds since 1970)
     };
+
+    // Order of the explorer (key S); directories always come first
+    enum class Sort { SIZE, NAME, AGE };
 
     struct BonsaiPieEntry {
         std::string label;
@@ -76,6 +84,12 @@ public:
 
         // Bumped when what folders hold changed (a deletion): their listings are read again (see Listing)
         std::atomic<uint64_t> listing_version{0};
+
+        std::atomic<Sort> sort{Sort::SIZE};
+
+        // UI thread only: the age column (key A), and the entries marked with SPACE (real paths)
+        bool show_age = false;
+        std::set<std::string> marked;
 
         std::mutex cv_mutex;
         std::condition_variable cv;

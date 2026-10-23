@@ -16,6 +16,9 @@ Explanation:
     - totals(path) / get(path) to read a directory (thread-safe).
     - cleanup() for the cleanup suggestions.
     - search(query) to find folders by name.
+    - rescan(path) to scan one folder again, growth() for what grew since the previous scan.
+- A folder scanned again gets a tree of its own, laid over the main one (see Overlay): the main tree
+  never changes shape, so nothing reading it can see a folder half replaced.
 */
 
 #pragma once
@@ -27,6 +30,7 @@ Explanation:
 #include <atomic>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -42,6 +46,7 @@ public:
     struct ScannerRemoveResult {
         std::string reason;
         bool failed;
+        std::string rescan;   // A folder to scan again for exact totals ("": none), see remove()
     };
 
     /* Metric
@@ -60,6 +65,7 @@ public:
         int64_t newest = 0;   // Last modification below it (seconds since 1970)
         bool final = false;   // Completely scanned; otherwise from the cache, or still growing
         bool known = false;   // In this scan or in the cache
+        bool error = false;   // A folder in it couldn't be read completely: the totals may be too low
     };
 
     // One cleanup suggestion (see cleanup())
@@ -119,10 +125,50 @@ public:
     - What could be cleaned in the user's spaces, biggest first:
         - caches and rebuildable folders (pip / conda / spack / apptainer caches, __pycache__, build folders...)
         - big folders where nothing changed for CLEANUP_OLD_DAYS days
+        - folders holding many files (the file quota), each where its files are, not every folder above it
         - core dumps and the largest files
+    - Sorted by size on disk, or by files when the explorer shows files.
     - Works during the scan too, on what was found so far.
     */
     std::vector<CleanupItem> cleanup();
+
+    /* rescan(path)
+    - Scans `path` again, on the calling thread: after changes made elsewhere, or for a folder made after the scan.
+    - Its new totals replace the old ones, and the folders above it get the difference.
+    - Refused while the main scan hasn't finished that folder (it would be counted twice).
+    */
+    struct RescanResult {
+        std::string message;
+        bool failed;
+    };
+    RescanResult rescan(const std::string& path);
+
+    // A file made by bonsai-romeo (an archive): counted in its folder and the ones above
+    void addFile(const std::string& path);
+
+    /* growth(max_items)
+    - Folders that grew the most since the previous scan (the cache), for the current metric.
+    - Each growth is listed where it happened: a folder whose growth is mostly one sub-folder's is skipped.
+    - Only folders scanned completely, in spaces the previous scan covered.
+    */
+    struct GrowthItem {
+        std::string path;
+        int64_t delta;   // Change of the current metric
+        Totals now;
+        bool is_new;     // Not in the previous scan
+    };
+    std::vector<GrowthItem> growth(size_t max_items);
+
+    // When the previous scan was saved (seconds since 1970), 0 if there was none
+    int64_t previousScan() const { return cache_time; }
+
+    // Folders that couldn't be read completely, and how many there are
+    struct ReadError {
+        std::string path;
+        int error;   // errno
+    };
+    std::vector<ReadError> readErrors(size_t max_items);
+    uint32_t readErrorCount();
 
     // A folder found by search()
     struct SearchHit {
@@ -155,6 +201,39 @@ public:
     uint32_t directories() const { return tree.count(); }
 
 private:
+    /* Overlay
+    - The tree of a folder scanned again (see rescan()). Its totals replace the main tree's for that
+      folder and everything below it; the main tree's old nodes stay where they are, unused.
+    - Shared pointers: a reader keeps the overlay it is using, even when a newer scan replaces it.
+    */
+    struct Overlay {
+        std::string root;
+        std::unique_ptr<DirTree> tree;
+        int64_t started_at = 0;
+    };
+
+    // The overlay holding `path` (the deepest one), or nullptr for the main tree
+    std::shared_ptr<Overlay> overlayFor(std::string_view path) const;
+
+    // Every folder of the main tree and of the overlays, each from the tree that has its current totals
+    using TreeFn = std::function<bool(const std::string&, const DirTree::Node&, const DirTree&)>;
+    void walkAll(const TreeFn& fn);
+    void walkTree(const DirTree& t, const std::string& root, const std::vector<std::shared_ptr<Overlay>>& list, const TreeFn& fn);
+
+    // Adds `added` and takes `removed` off `dir` and every folder above it, across the trees
+    void adjust(std::string dir, const DirTree::Counts& added, const DirTree::Counts& removed);
+
+    // After a folder was scanned again: the read errors marked above it, from what is below them now
+    void refreshErrorMarks(std::string dir);
+
+    // A file found by the walker, by its path
+    struct FoundFile {
+        std::string path;
+        uint64_t disk;
+        uint64_t bytes;
+        int64_t mtime;
+    };
+
     struct Cached {
         uint64_t bytes;
         uint64_t disk;
@@ -168,7 +247,7 @@ private:
     // Whether this scan has the final word on `path`: scanned completely, or found to be gone
     bool coveredByScan(const std::string& path);
 
-    std::string filePath(uint32_t dir, const std::string& name) const;
+    static std::string filePath(const DirTree& t, uint32_t dir, const std::string& name);
 
     fs::path path;
     fs::path db_path;
@@ -179,15 +258,27 @@ private:
     // Set when the scan has completed, or to make it stop early
     std::atomic<bool> done{false};
 
+    // Set when the program quits: stops a scan of one folder too
+    std::atomic<bool> stopping{false};
+
+    // When the main scan started (seconds since 1970): a file changed after it may not have its scanned size
+    std::atomic<int64_t> started_at{0};
+
+    mutable std::mutex overlays_mutex;
+    std::vector<std::shared_ptr<Overlay>> overlays;
+    std::atomic<size_t> overlay_count{0};
+
     std::atomic<Metric> metric{Metric::BYTES};
 
     // The previous scan. Filled once by loadCache(), read-only after cache_ready is set
     std::unordered_map<std::string, Cached> cache;
     std::atomic<bool> cache_ready{false};
+    int64_t cache_time = 0;   // Set by loadCache(), before cache_ready
 
-    // Largest files and core dumps seen by the walker
+    // Largest files and core dumps seen by the walkers
     std::mutex findings_mutex;
-    Walker::Findings findings;
+    std::vector<FoundFile> largest;
+    std::vector<FoundFile> cores;
 
     // Only one thread writes the snapshot file at a time
     std::mutex snapshot_mutex;

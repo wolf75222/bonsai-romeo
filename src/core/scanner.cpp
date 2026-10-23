@@ -13,10 +13,12 @@
 #include <fstream>
 #include <sstream>
 #include <dirent.h>
+#include <optional>
 #include <sys/stat.h>
 #include <thread>
 #include <type_traits>
 #include <unistd.h>
+#include <unordered_set>
 
 namespace {
 
@@ -29,6 +31,38 @@ constexpr uint64_t CACHE_MIN_INODES = 500;
 
 constexpr uint64_t MIB = 1024 * 1024;
 constexpr uint64_t GIB = 1024 * MIB;
+
+// A folder holding at least this many files is suggested for the file quota (see cleanup())
+constexpr uint64_t MANY_FILES = 10000;
+
+// A sub-folder holding this share of a folder's files (or growth) is where they are, not the folder
+constexpr double MOSTLY = 0.8;
+
+// Scan threads: the config, or BONSAI_THREADS (e.g. inside a job); 0 picks them automatically
+unsigned scanThreads() {
+    int threads = Config::get().SCANNER_THREADS;
+    if (const char* env = std::getenv("BONSAI_THREADS"); env && *env)
+        threads = std::atoi(env);
+    return static_cast<unsigned>(std::max(0, threads));
+}
+
+DirTree::Counts countsOf(const DirTree::Node& n) {
+    return DirTree::Counts{n.size.load(std::memory_order_relaxed), n.disk.load(std::memory_order_relaxed),
+                           n.inodes.load(std::memory_order_relaxed), n.newest.load(std::memory_order_relaxed)};
+}
+
+std::string parentOf(const std::string& path) {
+    const size_t slash = path.rfind('/');
+    if (slash == std::string::npos || path == "/") return "";
+    return slash == 0 ? "/" : path.substr(0, slash);
+}
+
+std::string childOf(const std::string& dir, std::string_view name) {
+    std::string out = dir == "/" ? "" : dir;
+    out += '/';
+    out += name;
+    return out;
+}
 
 /* Folders that can be cleaned
 - name: folder name; parent: name of the folder it must be in (nullptr: anywhere); prefix: name only has to start with it
@@ -172,6 +206,10 @@ RemovalCheck checkRemoval(const std::string& root, uid_t uid) {
 }
 
 void Scanner::loadCache() {
+    struct stat st;
+    if (stat(this->db_path.c_str(), &st) == 0)
+        cache_time = st.st_mtime;
+
     std::ifstream in(this->db_path);
     std::string line;
     bool v2 = false;
@@ -237,9 +275,11 @@ bool Scanner::coveredByScan(const std::string& p) {
     // The deepest folder of the tree on the way to `p`: if it is complete, `p` was written, or it is gone
     std::string probe = p;
     while (true) {
-        const uint32_t id = tree.find(probe);
+        const auto ov = overlayFor(probe);
+        const DirTree& t = ov ? *ov->tree : tree;
+        const uint32_t id = t.find(probe);
         if (id != DirTree::NONE)
-            return tree.node(id).complete.load(std::memory_order_acquire);
+            return t.node(id).complete.load(std::memory_order_acquire);
 
         const size_t slash = probe.rfind('/');
         if (slash == std::string::npos || slash == 0)
@@ -264,18 +304,19 @@ void Scanner::snapshot() {
 
     out << CACHE_HEADER << '\n';
 
-    // 1. What this scan found, for the folders it scanned completely
-    tree.forEach([&out](const std::string& path, const DirTree::Node& dir) {
+    // 1. What this scan found, for the folders it scanned completely (from the latest scan of each)
+    walkAll([&out](const std::string& path, const DirTree::Node& dir, const DirTree&) {
         if (!dir.complete.load(std::memory_order_acquire))
-            return;
+            return true;
 
         const uint64_t disk = dir.disk.load(std::memory_order_relaxed);
         const uint64_t inodes = dir.inodes.load(std::memory_order_relaxed);
         if (disk < CACHE_MIN_DISK && inodes < CACHE_MIN_INODES)
-            return;
+            return true;
 
         out << path << '\t' << dir.size.load(std::memory_order_relaxed) << '\t' << disk << '\t' << inodes
             << '\t' << dir.newest.load(std::memory_order_relaxed) << '\n';
+        return true;
     });
 
     // 2. The rest of the previous cache: other spaces, or folders this scan didn't finish
@@ -296,15 +337,20 @@ void Scanner::snapshot() {
 Scanner::Totals Scanner::totals(const fs::path& path) {
     Totals t;
 
-    const uint32_t id = tree.find(path.native());
+    // A folder scanned again: its own tree (kept alive while it is read)
+    const auto ov = overlayFor(path.native());
+    const DirTree& in = ov ? *ov->tree : tree;
+
+    const uint32_t id = in.find(path.native());
     if (id != DirTree::NONE) {
-        const DirTree::Node& n = tree.node(id);
+        const DirTree::Node& n = in.node(id);
 
         t.final = n.complete.load(std::memory_order_acquire);
         t.bytes = n.size.load(std::memory_order_relaxed);
         t.disk = n.disk.load(std::memory_order_relaxed);
         t.inodes = n.inodes.load(std::memory_order_relaxed);
         t.newest = n.newest.load(std::memory_order_relaxed);
+        t.error = n.error_below.load(std::memory_order_relaxed);
         t.known = true;
 
         if (t.final)
@@ -312,7 +358,7 @@ Scanner::Totals Scanner::totals(const fs::path& path) {
     }
 
     // Still being scanned: the previous scan's totals, never below what this one found so far
-    if (!done.load()) {
+    if (!ov && !done.load()) {
         if (const Cached* c = cached(path.native())) {
             t.bytes = std::max(t.bytes, c->bytes);
             t.disk = std::max(t.disk, c->disk);
@@ -343,8 +389,10 @@ uint64_t Scanner::getSnapped(const fs::path& path) {
         return 0;
 
     // Growth only makes sense against final totals
-    const uint32_t id = tree.find(path.native());
-    if (id == DirTree::NONE || !tree.node(id).complete.load(std::memory_order_acquire))
+    const auto ov = overlayFor(path.native());
+    const DirTree& in = ov ? *ov->tree : tree;
+    const uint32_t id = in.find(path.native());
+    if (id == DirTree::NONE || !in.node(id).complete.load(std::memory_order_acquire))
         return 0;
 
     const Cached* c = cached(path.native());
@@ -424,9 +472,9 @@ bool Scanner::visible(const fs::directory_entry& entry) {
         && scope.owns(entry.path());
 }
 
-std::string Scanner::filePath(uint32_t dir, const std::string& name) const {
+std::string Scanner::filePath(const DirTree& t, uint32_t dir, const std::string& name) {
     std::string out;
-    tree.path(dir, out);
+    t.path(dir, out);
     if (out != "/") out += '/';
     return out + name;
 }
@@ -438,7 +486,7 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
     const int64_t old_after = static_cast<int64_t>(std::max(1, Config::get().CLEANUP_OLD_DAYS)) * 86400;
 
     // Folders: the first match on the way down wins, nothing below it is suggested again
-    tree.walk([&](const std::string& path, const DirTree::Node& node) {
+    walkAll([&](const std::string& path, const DirTree::Node& node, const DirTree&) {
         if (scope.relation(path) != UserScope::Relation::INSIDE)
             return true;
 
@@ -466,6 +514,69 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
         return true;
     });
 
+    /* Many files, for the file quota
+    - A second pass, so they never hide a cache or old data below them; nothing inside those is suggested again
+    - Listed where the files are: a folder whose files are mostly in one to three big sub-folders is skipped for them,
+      and a whole space never is (its folders are)
+    */
+    std::unordered_set<std::string> suggested;
+    const std::vector<CleanupItem> first_pass = items;
+    for (const auto& item : items)
+        suggested.insert(item.path);
+
+    walkAll([&](const std::string& path, const DirTree::Node& node, const DirTree& t) {
+        const UserScope::Relation relation = scope.relation(path);
+        if (relation != UserScope::Relation::INSIDE)
+            return relation == UserScope::Relation::ANCESTOR;
+
+        const uint64_t inodes = node.inodes.load(std::memory_order_relaxed);
+        if (inodes < MANY_FILES || suggested.count(path))
+            return false;
+        if (scope.isRoot(path))
+            return true;
+
+        // Its big sub-folders: when one to three of them hold most of its files, they are listed instead
+        uint64_t in_big = 0;
+        int big = 0;
+        if (const DirTree::Block* block = node.children.load(std::memory_order_acquire)) {
+            for (uint32_t i = 0; i < block->count(); i++) {
+                const DirTree::Node& child = t.node(block->first + i);
+                if (child.removed.load(std::memory_order_relaxed))
+                    continue;
+
+                // A sub-folder scanned again has its totals in its own tree
+                const uint64_t files = overlay_count.load(std::memory_order_acquire) > 0
+                    ? totals(childOf(path, block->name(i))).inodes : child.inodes.load(std::memory_order_relaxed);
+                if (files >= MANY_FILES) {
+                    in_big += files;
+                    big++;
+                }
+            }
+        }
+
+        if (big > 0 && big <= 3 && static_cast<double>(in_big) >= static_cast<double>(inodes) * MOSTLY)
+            return true;
+
+        // What is already suggested inside it isn't counted again
+        uint64_t files = inodes;
+        uint64_t disk = node.disk.load(std::memory_order_relaxed);
+        for (const auto& other : first_pass) {
+            if (UserScope::isUnder(other.path, path)) {
+                files -= std::min(files, other.inodes);
+                disk -= std::min(disk, other.disk);
+            }
+        }
+        if (files < MANY_FILES)
+            return true;
+
+        // Spread over many big sub-folders: one archive of all of it is rarely what is wanted
+        const std::string hint = big > 3
+            ? FormatUtils::withSeparators(files) + " files, spread over " + std::to_string(big) + " big folders: open it, F shows files, then pack (T) or delete those"
+            : FormatUtils::withSeparators(files) + " files: pack them into one file (T in the explorer) to free your file quota, or delete what you no longer need";
+        items.push_back(CleanupItem{path, "many files", hint, disk, files, node.newest.load(std::memory_order_relaxed), false});
+        return false;
+    });
+
     // Files: core dumps and the largest files
     {
         std::lock_guard<std::mutex> lock(findings_mutex);
@@ -476,27 +587,25 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
             return lstat(file.c_str(), &st) != 0;
         };
 
-        for (const auto& hit : findings.cores) {
-            const std::string file = filePath(hit.dir, hit.name);
-            if (!gone(file))
-                items.push_back(CleanupItem{file, "core dump", "Memory dump of a crashed program: safe to delete", hit.disk, 1, hit.mtime, true});
+        for (const auto& hit : cores) {
+            if (!gone(hit.path))
+                items.push_back(CleanupItem{hit.path, "core dump", "Memory dump of a crashed program: safe to delete", hit.disk, 1, hit.mtime, true});
         }
 
-        for (const auto& hit : findings.largest) {
+        for (const auto& hit : largest) {
             if (hit.disk < 100 * MIB) break;
 
             // Already listed as a core dump
-            const bool core = std::any_of(findings.cores.begin(), findings.cores.end(), [&hit](const Walker::FileHit& c) {
-                return c.dir == hit.dir && c.name == hit.name;
-            });
-            const std::string file = filePath(hit.dir, hit.name);
-            if (!core && !gone(file))
-                items.push_back(CleanupItem{file, "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
+            const bool core = std::any_of(cores.begin(), cores.end(), [&hit](const FoundFile& c) { return c.path == hit.path; });
+            if (!core && !gone(hit.path))
+                items.push_back(CleanupItem{hit.path, "large file", "One of your largest files", hit.disk, 1, hit.mtime, true});
         }
     }
 
-    std::stable_sort(items.begin(), items.end(), [](const CleanupItem& a, const CleanupItem& b) {
-        return a.disk > b.disk;
+    // Biggest first: on disk, or by files when the explorer shows files (the file quota)
+    const bool by_files = metric.load() == Metric::INODES;
+    std::stable_sort(items.begin(), items.end(), [by_files](const CleanupItem& a, const CleanupItem& b) {
+        return by_files ? a.inodes > b.inodes : a.disk > b.disk;
     });
 
     // A large file inside a suggested folder is already covered by it
@@ -582,7 +691,7 @@ std::vector<Scanner::SearchHit> Scanner::search(const std::string& query, size_t
     size_t visited = 0;
     bool aborted = false;
 
-    tree.walk([&](const std::string& path, const DirTree::Node& node) {
+    walkAll([&](const std::string& path, const DirTree::Node& node, const DirTree&) {
         // A newer search is waiting: every folder left is skipped, so the walk ends right away
         if (aborted)
             return false;
@@ -610,7 +719,7 @@ std::vector<Scanner::SearchHit> Scanner::search(const std::string& query, size_t
 
         const Totals totals{node.size.load(std::memory_order_relaxed), node.disk.load(std::memory_order_relaxed),
                             node.inodes.load(std::memory_order_relaxed), node.newest.load(std::memory_order_relaxed),
-                            node.complete.load(std::memory_order_acquire), true};
+                            node.complete.load(std::memory_order_acquire), true, node.error_below.load(std::memory_order_relaxed)};
 
         // The path is only copied for the folders that are kept
         if (hits.size() < max_hits) {
@@ -663,7 +772,13 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
 
     std::error_code ec;
     const bool is_dir = fs::is_directory(fs::symlink_status(path, ec));
-    const uint32_t parent = tree.find(path.parent_path().native());
+    const std::string parent_path = path.parent_path().string();
+
+    // The tree that has the folder holding it: the main one, or the new scan of a folder above it
+    const auto parent_ov = overlayFor(parent_path);
+    DirTree& parent_tree = parent_ov ? *parent_ov->tree : tree;
+    const uint32_t parent = parent_tree.find(parent_path);
+    const int64_t scanned_from = parent_ov ? parent_ov->started_at : started_at.load();
 
     // Removing an entry takes writing in its folder (left as it is: it isn't part of what is removed)
     if (access(path.parent_path().c_str(), W_OK | X_OK) != 0) {
@@ -691,17 +806,24 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     /* A file is counted when its folder is read
     - Removed before that, it would be taken off totals it was never added to: wait (it is nearly always read already)
     - A file with other hard links frees nothing, and was counted once, maybe elsewhere: nothing to take off
+    - A file changed since the scan started (or made after it) may have been counted with another size, or not
+      at all: its folder is scanned again instead (`rescan` in the result), so the totals stay exact
     */
     DirTree::Counts file_counts;
+    std::string rescan_after;
     if (!is_dir) {
         if (parent != DirTree::NONE)
-            waitFor([&] { return tree.node(parent).read.load(std::memory_order_acquire); });
+            waitFor([&] { return parent_tree.node(parent).read.load(std::memory_order_acquire); });
 
         struct stat st;
-        if (lstat(path.c_str(), &st) == 0 && st.st_nlink <= 1) {
-            file_counts.bytes = S_ISREG(st.st_mode) ? static_cast<uint64_t>(st.st_size) : 0;
-            file_counts.disk = static_cast<uint64_t>(st.st_blocks) * 512;
-            file_counts.inodes = 1;
+        if (parent != DirTree::NONE && lstat(path.c_str(), &st) == 0 && st.st_nlink <= 1) {
+            if (st.st_ctime >= scanned_from) {
+                rescan_after = parent_path;
+            } else {
+                file_counts.bytes = S_ISREG(st.st_mode) ? static_cast<uint64_t>(st.st_size) : 0;
+                file_counts.disk = static_cast<uint64_t>(st.st_blocks) * 512;
+                file_counts.inodes = 1;
+            }
         }
     }
 
@@ -719,51 +841,356 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     }
 
     if (!is_dir) {
-        if (parent != DirTree::NONE)
-            tree.subtract(parent, file_counts);
+        if (parent != DirTree::NONE && rescan_after.empty())
+            adjust(parent_path, {}, file_counts);
     } else {
         /* A folder: everything the scan counted in it leaves every folder above it
         - Its totals are final once it is complete: during the scan that comes fast, its content being gone
         - Looked up after the removal: the scan may have just found it
         */
-        const uint32_t dir = tree.find(path.native());
+        const auto dir_ov = overlayFor(path.native());
+        DirTree& dir_tree = dir_ov ? *dir_ov->tree : tree;
+        const uint32_t dir = dir_tree.find(path.native());
 
         if (dir != DirTree::NONE) {
-            waitFor([&] { return tree.node(dir).complete.load(std::memory_order_acquire); });
+            waitFor([&] { return dir_tree.node(dir).complete.load(std::memory_order_acquire); });
 
-            DirTree::Node& node = tree.node(dir);
+            DirTree::Node& node = dir_tree.node(dir);
             const DirTree::Counts counts{node.size.load(), node.disk.load(), node.inodes.load(), 0};
+            const bool had_errors = node.error_below.load();
 
             node.removed = true;
-            if (node.parent != DirTree::NONE)
-                tree.subtract(node.parent, counts);
+            adjust(parent_path, {}, counts);
+
+            // Its unreadable folders are gone with it
+            if (had_errors)
+                refreshErrorMarks(parent_path);
         }
+    }
+
+    if (rescan_after.empty())
+        this->snapshot();
+
+    // Not an error: said next to the deletion
+    std::string remark;
+    if (made_writable > 0)
+        remark = std::to_string(made_writable) + " read-only folder" + (made_writable > 1 ? "s" : "") + " in it made writable first";
+
+    return ScannerRemoveResult{remark, false, rescan_after};
+}
+
+std::shared_ptr<Scanner::Overlay> Scanner::overlayFor(std::string_view p) const {
+    if (overlay_count.load(std::memory_order_acquire) == 0)
+        return nullptr;
+
+    std::lock_guard<std::mutex> lock(overlays_mutex);
+    std::shared_ptr<Overlay> best;
+    for (const auto& ov : overlays) {
+        if (UserScope::isUnder(p, ov->root) && (!best || ov->root.size() > best->root.size()))
+            best = ov;
+    }
+    return best;
+}
+
+void Scanner::walkAll(const TreeFn& fn) {
+    std::vector<std::shared_ptr<Overlay>> list;
+    if (overlay_count.load(std::memory_order_acquire) > 0) {
+        std::lock_guard<std::mutex> lock(overlays_mutex);
+        list = overlays;
+    }
+
+    walkTree(tree, path.string(), list, fn);
+}
+
+void Scanner::walkTree(const DirTree& t, const std::string& root, const std::vector<std::shared_ptr<Overlay>>& list, const TreeFn& fn) {
+    t.walk([&](const std::string& p, const DirTree::Node& node) {
+        // A folder scanned again: its new tree instead of the old nodes
+        if (!list.empty() && p != root) {
+            for (const auto& ov : list) {
+                if (ov->root == p) {
+                    walkTree(*ov->tree, ov->root, list, fn);
+                    return false;
+                }
+            }
+        }
+        return fn(p, node, t);
+    });
+}
+
+void Scanner::adjust(std::string dir, const DirTree::Counts& added, const DirTree::Counts& removed) {
+    while (!dir.empty()) {
+        const auto ov = overlayFor(dir);
+        DirTree& t = ov ? *ov->tree : tree;
+
+        const uint32_t id = t.find(dir);
+        if (id == DirTree::NONE)
+            return;
+
+        // Up to the root of that tree, in one walk
+        t.add(id, added);
+        t.subtract(id, removed);
+
+        if (!ov)
+            return;
+
+        // Then above the folder that was scanned again, in the tree that holds it
+        dir = parentOf(ov->root);
+    }
+}
+
+void Scanner::refreshErrorMarks(std::string dir) {
+    // Once a folder holds an error, so does every folder above it
+    bool below = false;
+
+    while (!dir.empty()) {
+        const auto ov = overlayFor(dir);
+        DirTree& t = ov ? *ov->tree : tree;
+
+        const uint32_t id = t.find(dir);
+        if (id == DirTree::NONE)
+            return;
+
+        DirTree::Node& node = t.node(id);
+        if (!below) {
+            below = node.error.load(std::memory_order_relaxed) != 0;
+            if (const DirTree::Block* block = node.children.load(std::memory_order_acquire)) {
+                for (uint32_t i = 0; i < block->count() && !below; i++)
+                    below = totals(childOf(dir, block->name(i))).error;
+            }
+        }
+        node.error_below.store(below, std::memory_order_relaxed);
+
+        dir = parentOf(dir);
+    }
+}
+
+Scanner::RescanResult Scanner::rescan(const std::string& target) {
+    if (stopping.load())
+        return RescanResult{"", true};
+
+    if (scope.relation(target) != UserScope::Relation::INSIDE)
+        return RescanResult{"Only your spaces and what they hold can be scanned again.", true};
+
+    std::error_code ec;
+    if (!fs::is_directory(fs::symlink_status(target, ec)))
+        return RescanResult{scope.display(target) + " isn't a folder anymore.", true};
+
+    // What the main scan still adds below a folder it hasn't finished would be counted twice
+    if (!done.load()) {
+        std::string probe = target;
+        bool finished = false;
+        while (!probe.empty()) {
+            const auto ov = overlayFor(probe);
+            const DirTree& t = ov ? *ov->tree : tree;
+            const uint32_t id = t.find(probe);
+            if (id != DirTree::NONE) {
+                finished = t.node(id).complete.load(std::memory_order_acquire);
+                break;
+            }
+            probe = parentOf(probe);
+        }
+
+        if (!finished)
+            return RescanResult{"The scan hasn't finished " + scope.display(target) + " yet: it shows up once it has.", true};
+    }
+
+    const Totals before = totals(target);
+
+    auto ov = std::make_shared<Overlay>();
+    ov->root = target;
+    ov->tree = std::make_unique<DirTree>(target);
+    ov->started_at = std::time(nullptr);
+
+    Walker walker(*ov->tree, scope, stopping, scanThreads());
+    walker.run();
+
+    if (stopping.load())
+        return RescanResult{"", true};
+
+    const DirTree::Counts now = countsOf(ov->tree->node(DirTree::ROOT));
+
+    // From here on, this folder and everything below it come from the new tree (older scans inside it are replaced)
+    {
+        std::lock_guard<std::mutex> lock(overlays_mutex);
+        overlays.erase(std::remove_if(overlays.begin(), overlays.end(), [&target](const std::shared_ptr<Overlay>& o) {
+            return UserScope::isUnder(o->root, target);
+        }), overlays.end());
+        overlays.push_back(ov);
+        overlay_count.store(overlays.size(), std::memory_order_release);
+    }
+
+    // The folders above get the difference
+    auto delta = [](uint64_t after, uint64_t was, uint64_t& up, uint64_t& down) {
+        if (after >= was) up = after - was; else down = was - after;
+    };
+    DirTree::Counts added, removed;
+    delta(now.bytes, before.bytes, added.bytes, removed.bytes);
+    delta(now.disk, before.disk, added.disk, removed.disk);
+    delta(now.inodes, before.inodes, added.inodes, removed.inodes);
+    added.newest = now.newest;
+    adjust(parentOf(target), added, removed);
+
+    // Unreadable folders: the new tree has its own marks, the ones above are worked out again
+    if (before.error || ov->tree->node(DirTree::ROOT).error_below.load())
+        refreshErrorMarks(parentOf(target));
+
+    // Its largest files and core dumps, from the new scan
+    {
+        const Walker::Findings found = walker.findings();
+        std::lock_guard<std::mutex> lock(findings_mutex);
+
+        auto inside = [&target](const FoundFile& f) { return UserScope::isUnder(f.path, target); };
+        largest.erase(std::remove_if(largest.begin(), largest.end(), inside), largest.end());
+        cores.erase(std::remove_if(cores.begin(), cores.end(), inside), cores.end());
+
+        for (const auto& hit : found.largest)
+            largest.push_back(FoundFile{filePath(*ov->tree, hit.dir, hit.name), hit.disk, hit.bytes, hit.mtime});
+        for (const auto& hit : found.cores)
+            cores.push_back(FoundFile{filePath(*ov->tree, hit.dir, hit.name), hit.disk, hit.bytes, hit.mtime});
+
+        std::sort(largest.begin(), largest.end(), [](const FoundFile& a, const FoundFile& b) { return a.disk > b.disk; });
+        if (largest.size() > Walker::LARGEST_FILES)
+            largest.resize(Walker::LARGEST_FILES);
     }
 
     this->snapshot();
 
-    // Not an error: said next to the deletion
-    if (made_writable > 0)
-        return ScannerRemoveResult{std::to_string(made_writable) + " read-only folder" + (made_writable > 1 ? "s" : "") + " in it made writable first", false};
+    // "~/x: 1.20 GiB on disk, 12.3k files (+300 files)"
+    std::string change;
+    if (now.inodes != before.inodes && before.known) {
+        const bool more = now.inodes > before.inodes;
+        change = std::string(" (") + (more ? "+" : "-") + FormatUtils::withSeparators(more ? now.inodes - before.inodes : before.inodes - now.inodes) + " files)";
+    }
 
-    return ScannerRemoveResult{"", false};
+    return RescanResult{scope.display(target) + ": " + FormatUtils::toReadable(now.disk, " ") + " on disk, "
+                        + FormatUtils::withSeparators(now.inodes) + " files" + change, false};
+}
+
+void Scanner::addFile(const std::string& file) {
+    struct stat st;
+    if (lstat(file.c_str(), &st) != 0)
+        return;
+
+    const DirTree::Counts counts{S_ISREG(st.st_mode) ? static_cast<uint64_t>(st.st_size) : 0,
+                                 static_cast<uint64_t>(st.st_blocks) * 512, 1, st.st_mtime};
+    adjust(parentOf(file), counts, {});
+}
+
+std::vector<Scanner::GrowthItem> Scanner::growth(size_t max_items) {
+    std::vector<GrowthItem> items;
+    if (!cache_ready.load(std::memory_order_acquire) || cache.empty())
+        return items;
+
+    const bool files = metric.load() == Metric::INODES;
+    const int64_t least = files ? 1000 : static_cast<int64_t>(100 * MIB);
+
+    auto previous = [this](const std::string& p) -> std::optional<int64_t> {
+        const Cached* c = cached(p);
+        if (!c) return std::nullopt;
+        return static_cast<int64_t>(value(Totals{c->bytes, c->disk, c->inodes, c->newest, true, true}));
+    };
+
+    walkAll([&](const std::string& p, const DirTree::Node& node, const DirTree&) {
+        const UserScope::Relation relation = scope.relation(p);
+        if (relation != UserScope::Relation::INSIDE)
+            return relation == UserScope::Relation::ANCESTOR;
+
+        // Still growing: compared once scanned. A space the previous scan didn't cover can't be compared
+        if (!node.complete.load(std::memory_order_acquire))
+            return false;
+        if (scope.isRoot(p) && !cached(p))
+            return false;
+
+        const Totals now{node.size.load(std::memory_order_relaxed), node.disk.load(std::memory_order_relaxed),
+                         node.inodes.load(std::memory_order_relaxed), node.newest.load(std::memory_order_relaxed),
+                         true, true, node.error_below.load(std::memory_order_relaxed)};
+        const std::optional<int64_t> was = previous(p);
+        const int64_t delta = static_cast<int64_t>(value(now)) - was.value_or(0);
+
+        // Net growth: below a folder that didn't grow, nothing is looked at
+        if (delta < least)
+            return false;
+
+        // Listed where it happened: not when one sub-folder holds most of it
+        int64_t most = 0;
+        if (const DirTree::Block* block = node.children.load(std::memory_order_acquire)) {
+            for (uint32_t i = 0; i < block->count(); i++) {
+                const std::string child = childOf(p, block->name(i));
+                most = std::max(most, static_cast<int64_t>(value(totals(child))) - previous(child).value_or(0));
+            }
+        }
+
+        if (static_cast<double>(most) < static_cast<double>(delta) * MOSTLY)
+            items.push_back(GrowthItem{p, delta, now, !was});
+        return true;
+    });
+
+    std::sort(items.begin(), items.end(), [](const GrowthItem& a, const GrowthItem& b) { return a.delta > b.delta; });
+    if (items.size() > max_items)
+        items.resize(max_items);
+
+    return items;
+}
+
+std::vector<Scanner::ReadError> Scanner::readErrors(size_t max_items) {
+    std::vector<ReadError> out;
+
+    walkAll([&](const std::string& p, const DirTree::Node& node, const DirTree&) {
+        if (!node.error_below.load(std::memory_order_relaxed))
+            return false;
+
+        const int16_t error = node.error.load(std::memory_order_relaxed);
+        if (error != 0 && out.size() < max_items)
+            out.push_back(ReadError{p, error});
+        return out.size() < max_items;
+    });
+
+    return out;
+}
+
+uint32_t Scanner::readErrorCount() {
+    // The main tree counts its own; once folders were scanned again, their old errors no longer count
+    if (overlay_count.load(std::memory_order_acquire) == 0)
+        return tree.errors();
+
+    uint32_t count = 0;
+    walkAll([&count](const std::string&, const DirTree::Node& node, const DirTree&) {
+        if (!node.error_below.load(std::memory_order_relaxed))
+            return false;
+        if (node.error.load(std::memory_order_relaxed) != 0)
+            count++;
+        return true;
+    });
+    return count;
 }
 
 void Scanner::scan() {
+    started_at.store(std::time(nullptr));
+
     // The previous scan is read while this one starts: it only delays what is shown, never the scan
     std::thread loader(&Scanner::loadCache, this);
 
-    // BONSAI_THREADS overrides the config, e.g. to use more threads inside a job
-    int threads = Config::get().SCANNER_THREADS;
-    if (const char* env = std::getenv("BONSAI_THREADS"); env && *env)
-        threads = std::atoi(env);
-
-    Walker walker(tree, scope, done, std::max(0, threads));
+    Walker walker(tree, scope, done, scanThreads());
     walker.run();
 
     {
+        const Walker::Findings found = walker.findings();
         std::lock_guard<std::mutex> lock(findings_mutex);
-        findings = walker.findings();
+
+        // A folder scanned again meanwhile already gave its own (see rescan())
+        auto add = [this](std::vector<FoundFile>& list, const Walker::FileHit& hit) {
+            std::string file = filePath(tree, hit.dir, hit.name);
+            if (!overlayFor(file))
+                list.push_back(FoundFile{std::move(file), hit.disk, hit.bytes, hit.mtime});
+        };
+        for (const auto& hit : found.largest)
+            add(largest, hit);
+        for (const auto& hit : found.cores)
+            add(cores, hit);
+
+        std::sort(largest.begin(), largest.end(), [](const FoundFile& a, const FoundFile& b) { return a.disk > b.disk; });
+        if (largest.size() > Walker::LARGEST_FILES)
+            largest.resize(Walker::LARGEST_FILES);
     }
 
     loader.join();
@@ -771,6 +1198,7 @@ void Scanner::scan() {
 }
 
 void Scanner::stop() {
+    this->stopping = true;
     this->done = true;
 }
 

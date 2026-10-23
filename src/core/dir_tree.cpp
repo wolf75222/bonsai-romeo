@@ -165,6 +165,18 @@ void DirTree::listed(uint32_t dir, uint32_t subdirs) {
     }
 }
 
+void DirTree::markError(uint32_t dir, int error) {
+    int16_t none = 0;
+    if (node(dir).error.compare_exchange_strong(none, static_cast<int16_t>(error != 0 ? error : -1)))
+        error_count.fetch_add(1, std::memory_order_relaxed);
+
+    // Up to the first directory that already knows
+    for (uint32_t id = dir; id != NONE; id = node(id).parent) {
+        if (node(id).error_below.exchange(true, std::memory_order_relaxed))
+            break;
+    }
+}
+
 uint32_t DirTree::find(std::string_view path) const {
     if (path.size() < root.size() || path.compare(0, root.size(), root) != 0)
         return NONE;

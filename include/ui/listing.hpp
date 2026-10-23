@@ -37,6 +37,7 @@ public:
         bool owned;      // Belongs to the user
         uint64_t bytes;  // Files: apparent size
         uint64_t disk;   // Files: allocated on disk
+        int64_t mtime;   // Last modification (seconds since 1970)
     };
 
     static constexpr std::chrono::seconds MAX_AGE{10};
@@ -106,7 +107,7 @@ private:
                 continue;
 
             out.push_back(Entry{entry.path().string(), entry.path().filename().string(), S_ISDIR(st.st_mode), S_ISREG(st.st_mode),
-                                st.st_uid == uid, static_cast<uint64_t>(st.st_size), static_cast<uint64_t>(st.st_blocks) * 512});
+                                st.st_uid == uid, static_cast<uint64_t>(st.st_size), static_cast<uint64_t>(st.st_blocks) * 512, st.st_mtime});
         }
 
         return out;
