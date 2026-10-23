@@ -27,6 +27,7 @@ set(SRC
     src/ui/modal_confirm.cpp
     src/ui/modal_error.cpp
     src/ui/piechart.cpp
+    src/ui/search_view.cpp
     src/ui/quota_view.cpp
 )
 

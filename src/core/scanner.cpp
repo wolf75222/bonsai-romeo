@@ -8,7 +8,9 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <cctype>
 #include <fstream>
+#include <sstream>
 #include <sys/stat.h>
 #include <thread>
 #include <type_traits>
@@ -405,6 +407,117 @@ std::vector<Scanner::CleanupItem> Scanner::cleanup() {
         kept.resize(300);
 
     return kept;
+}
+
+namespace {
+
+std::string lower(std::string_view s) {
+    std::string out(s);
+    std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return std::tolower(c); });
+    return out;
+}
+
+// `needle` is already in lower case
+bool containsNoCase(std::string_view hay, const std::string& needle) {
+    return std::search(hay.begin(), hay.end(), needle.begin(), needle.end(), [](char a, char b) {
+        return std::tolower(static_cast<unsigned char>(a)) == b;
+    }) != hay.end();
+}
+
+}
+
+// Whether `word` (lower case) is in the path as display() shows it, without building it for every folder
+static bool shownPathContains(const UserScope& scope, const std::string& real, const std::string& word) {
+    for (const auto& [prefix, shown] : scope.aliases) {
+        if (!UserScope::isUnder(real, prefix))
+            continue;
+
+        const std::string_view rest = std::string_view(real).substr(prefix.size());
+        if (containsNoCase(shown, word) || containsNoCase(rest, word))
+            return true;
+
+        // A word across both parts ("~/adc"): rare, so the shown path is only built then
+        return word.find('/') != std::string::npos && containsNoCase(shown + std::string(rest), word);
+    }
+
+    return containsNoCase(real, word);
+}
+
+std::vector<Scanner::SearchHit> Scanner::search(const std::string& query, size_t max_hits, size_t& total,
+                                                const std::function<bool()>& cancelled) {
+    total = 0;
+
+    std::vector<std::string> words;
+    {
+        std::istringstream in(query);
+        std::string word;
+        while (in >> word)
+            words.push_back(lower(word));
+    }
+
+    if (words.empty() || max_hits == 0)
+        return {};
+
+    const std::string& last = words.back();
+
+    // The best `max_hits` so far, smallest first (min-heap on the current metric)
+    std::vector<SearchHit> hits;
+    auto smaller = [this](const SearchHit& a, const SearchHit& b) { return value(a.totals) > value(b.totals); };
+
+    size_t visited = 0;
+    bool aborted = false;
+
+    tree.walk([&](const std::string& path, const DirTree::Node& node) {
+        // A newer search is waiting: every folder left is skipped, so the walk ends right away
+        if (aborted)
+            return false;
+        if ((++visited & 4095) == 0 && cancelled && cancelled()) {
+            aborted = true;
+            return false;
+        }
+
+        // The last word must be in the folder name: cheap, so it goes first
+        const size_t slash = path.rfind('/');
+        const std::string_view name = std::string_view(path).substr(slash == std::string::npos ? 0 : slash + 1);
+        if (name.empty() || !containsNoCase(name, last))
+            return true;
+
+        if (scope.relation(path) != UserScope::Relation::INSIDE)
+            return true;
+
+        // The other words anywhere in the path, as the user sees it
+        for (size_t i = 0; i + 1 < words.size(); i++) {
+            if (!shownPathContains(scope, path, words[i]))
+                return true;
+        }
+
+        total++;
+
+        const Totals totals{node.size.load(std::memory_order_relaxed), node.disk.load(std::memory_order_relaxed),
+                            node.inodes.load(std::memory_order_relaxed), node.newest.load(std::memory_order_relaxed),
+                            node.complete.load(std::memory_order_acquire), true};
+
+        // The path is only copied for the folders that are kept
+        if (hits.size() < max_hits) {
+            hits.push_back(SearchHit{path, totals});
+            std::push_heap(hits.begin(), hits.end(), smaller);
+        } else if (value(totals) > value(hits.front().totals)) {
+            std::pop_heap(hits.begin(), hits.end(), smaller);
+            hits.back().path.assign(path);
+            hits.back().totals = totals;
+            std::push_heap(hits.begin(), hits.end(), smaller);
+        }
+
+        return true;
+    });
+
+    if (aborted) {
+        total = 0;
+        return {};
+    }
+
+    std::sort_heap(hits.begin(), hits.end(), smaller);
+    return hits;
 }
 
 Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {

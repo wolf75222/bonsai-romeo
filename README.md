@@ -20,6 +20,9 @@ What changes compared to upstream:
   (pip, conda, spack, apptainer caches, `__pycache__`, `node_modules`, build folders, virtual
   envs...), big folders untouched for 6 months, core dumps and your largest files, biggest first,
   with how to clean each one. `TAB` filters by kind, `ENTER` opens the entry in the explorer.
+- **Folder search** (key `/`): finds folders by name in all your spaces as you type, biggest
+  first. Words are searched in the path, the last one in the folder name (`adc build`: the build
+  folders under adc...). `ENTER` opens the folder in the explorer.
 - **Quota dashboard** (key `U`, or `bonsai-romeo --quota`): your GPFS quotas with gauges, for
   space *and* number of files, same rules as ROMEO's `/apps/romeotools/myquotas.sh`.
 - **Faster scan on GPFS**: up to 32 threads (measured: 33 s with upstream's 16, 26 s with 32, for
@@ -60,6 +63,7 @@ bonsai-romeo --summary             # sizes and file counts, no UI
 | Key | Action |
 |-----|--------|
 | `F` | size / size on disk / number of files |
+| `/` | search folders (`UP`/`DOWN` select, `ENTER` open, `ESC` close) |
 | `C` | cleanup suggestions (`TAB` kind, `ENTER` open, `ESC` close) |
 | `U` | quota dashboard / back to the pie chart |
 | `R` | refresh the quotas |

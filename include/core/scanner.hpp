@@ -15,6 +15,7 @@ Explanation:
     - scan() to start scanning the root path.
     - totals(path) / get(path) to read a directory (thread-safe).
     - cleanup() for the cleanup suggestions.
+    - search(query) to find folders by name.
 */
 
 #pragma once
@@ -25,6 +26,7 @@ Explanation:
 
 #include <atomic>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -115,6 +117,24 @@ public:
     - Works during the scan too, on what was found so far.
     */
     std::vector<CleanupItem> cleanup();
+
+    // A folder found by search()
+    struct SearchHit {
+        std::string path;
+        Totals totals;
+    };
+
+    /* search(query, max_hits, total)
+    - Folders of the user's spaces matching `query`, biggest first (current metric), at most `max_hits`.
+    - Case-insensitive. Every word must be in the folder's path (as shown: ~/..., /project/...),
+      the last one in the folder's own name: "build" finds every *build* folder, "adc build" only
+      those under a path holding "adc".
+    - `total` gets the number of matches, even beyond `max_hits`.
+    - Works during the scan too, on the folders found so far.
+    - `cancelled` is asked now and then: when it says true, the search stops and returns nothing.
+    */
+    std::vector<SearchHit> search(const std::string& query, size_t max_hits, size_t& total,
+                                  const std::function<bool()>& cancelled = {});
 
     const UserScope& getScope() const { return scope; }
     uint32_t directories() const { return tree.count(); }

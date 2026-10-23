@@ -7,6 +7,7 @@
 #include "../include/ui/menu.hpp"
 #include "../include/ui/quota_view.hpp"
 #include "../include/ui/cleanup_view.hpp"
+#include "../include/ui/search_view.hpp"
 #include "../include/utils/format.hpp"
 
 #include <ftxui/component/screen_interactive.hpp>
@@ -120,7 +121,7 @@ int main(int argc, char* argv[]) {
                          "  BONSAI_ROOTS=dir1:dir2   override the detected spaces\n"
                          "  BONSAI_THREADS=n         scan threads (default: automatic, up to 32)\n"
                          "  BONSAI_COLOR=truecolor|256|16   force the color mode (default: auto)\n"
-                         "Keys: F size / disk / files, C cleanup suggestions, U quotas, R refresh quotas,\n"
+                         "Keys: F size / disk / files, / search folders, C cleanup suggestions, U quotas, R refresh quotas,\n"
                          "      D (or SUPPR) delete, ENTER open, Backspace/ESC up, Q quit\n"
                          "Sizes marked ~ come from the previous scan (or are still growing) until the folder is scanned.\n";
             return 0;
@@ -210,6 +211,7 @@ int main(int argc, char* argv[]) {
     quotas.onUpdate([&screen] { screen.PostEvent(Event::Custom); });
     bool show_quota = false;
     bool show_cleanup = false;
+    bool show_search = false;
 
     Scanner scanner = Scanner(default_path, db_path, scope);
     std::thread scanner_thread([&scanner]() {
@@ -367,7 +369,8 @@ int main(int argc, char* argv[]) {
                 text(" ")
             }) | flex,
             separator(),
-            text(" F size C clean U quota D del Q quit") | color(Color::GrayDark),
+            text(" F size  C clean  / find  U quota") | color(Color::GrayDark),
+            text(" D delete  Q quit") | color(Color::GrayDark),
         });
     });
 
@@ -381,47 +384,70 @@ int main(int argc, char* argv[]) {
 
     auto window = ResizableSplitLeft(left, right, &config.SIDEBAR_WIDTH);
 
-    /* Cleanup suggestions (key C)
-    - ENTER goes to the entry in the explorer, selected, so D deletes it
+    /* Opening a path in the explorer (from the cleanup or the search window)
+    - Goes to its folder with it selected, so ENTER opens it and D deletes it
     */
+    auto open_in_explorer = [&](const std::string& path) {
+        fs::path target(path);
+        fs::path folder = target.parent_path();
+
+        // Never above where the explorer starts
+        if (!UserScope::isUnder(folder.native(), default_path.native()))
+            folder = target;
+
+        {
+            std::lock_guard<std::mutex> lock(data->menu_mutex);
+            *data->path = folder.string();
+            data->select_label = folder == target ? "" : target.filename().string();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(data->cv_mutex);
+            data->menu_path_changed = true;
+            data->pie_path_changed = true;
+        }
+        data->cv.notify_all();
+
+        show_quota = false;
+    };
+
+    // Cleanup suggestions (key C)
     auto cleanup_state = std::make_shared<BonsaiCleanup::State>();
     auto cleanup_component = BonsaiCleanup::window(cleanup_state, &scanner.getScope(),
         [&](const Scanner::CleanupItem& item) {
-            fs::path target(item.path);
-            fs::path folder = target.parent_path();
-
-            // Never above where the explorer starts
-            if (!UserScope::isUnder(folder.native(), default_path.native()))
-                folder = target;
-
-            {
-                std::lock_guard<std::mutex> lock(data->menu_mutex);
-                *data->path = folder.string();
-                data->select_label = folder == target ? "" : target.filename().string();
-            }
-
-            {
-                std::lock_guard<std::mutex> lock(data->cv_mutex);
-                data->menu_path_changed = true;
-                data->pie_path_changed = true;
-            }
-            data->cv.notify_all();
-
-            show_quota = false;
+            open_in_explorer(item.path);
             show_cleanup = false;
         },
         [&] { show_cleanup = false; });
 
+    // Folder search (key /), searched on its own thread
+    auto search_state = std::make_shared<BonsaiSearch::State>();
+    BonsaiSearch::Worker search_worker(search_state, &scanner, [&screen] { screen.PostEvent(Event::Custom); });
+    auto search_component = BonsaiSearch::window(search_state, &search_worker, &scanner,
+        [&](const std::string& path) {
+            open_in_explorer(path);
+            show_search = false;
+        },
+        [&] { show_search = false; });
+
     window |= Modal(confirm_modal, &show_confirm_modal);
     window |= Modal(error_modal, &show_error_modal);
     window |= Modal(cleanup_component, &show_cleanup);
+    window |= Modal(search_component, &show_search);
 
-    auto modal_open = [&] { return show_confirm_modal || show_error_modal || show_cleanup; };
+    auto modal_open = [&] { return show_confirm_modal || show_error_modal || show_cleanup || show_search; };
 
     // Quit with q, allow sidebar resize with arrow keys
     auto app = CatchEvent(window, [&](Event event) {
-        if (event == Event::Character('q') || event == Event::Character('Q')) {
+        // Not while typing a search
+        if ((event == Event::Character('q') || event == Event::Character('Q')) && !show_search) {
             screen.Exit();
+            return true;
+        }
+
+        if (event == Event::Character('/') && !modal_open()) {
+            search_worker.request(search_state->query);
+            show_search = true;
             return true;
         }
 
