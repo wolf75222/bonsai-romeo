@@ -186,6 +186,7 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
     }
 
     uint64_t file_bytes = 0;
+    uint64_t inodes = !above_scope && st.st_uid == scope.uid ? 1 : 0; // The directory itself
     uint32_t dir_count = 0;
     scratch.names.clear();
 
@@ -217,13 +218,25 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
                 if (S_ISREG(file.st_mode) && !above_scope && file.st_uid == scope.uid)
                     file_bytes += static_cast<uint64_t>(file.st_size);
 
-                if (!S_ISDIR(file.st_mode))
+                // A directory counts itself once it is visited
+                if (!S_ISDIR(file.st_mode)) {
+                    if (!above_scope && file.st_uid == scope.uid)
+                        inodes++;
                     continue;
+                }
 
                 type = TYPE_DIR;
             }
 
-            if (type == TYPE_DIR && above_scope) {
+            // Symlinks, sockets, ...: no size, but each one uses an inode
+            if (type != TYPE_DIR) {
+                struct stat other;
+                if (!above_scope && fstatat(fd, name, &other, AT_SYMLINK_NOFOLLOW) == 0 && other.st_uid == scope.uid)
+                    inodes++;
+                continue;
+            }
+
+            if (above_scope) {
                 scratch.child.assign(scratch.path == "/" ? "" : scratch.path);
                 scratch.child += '/';
                 scratch.child += name;
@@ -232,10 +245,8 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
                     continue;
             }
 
-            if (type == TYPE_DIR) {
-                scratch.names.insert(scratch.names.end(), name, name + std::strlen(name) + 1);
-                dir_count++;
-            }
+            scratch.names.insert(scratch.names.end(), name, name + std::strlen(name) + 1);
+            dir_count++;
         }
     }
 
@@ -251,4 +262,5 @@ void Walker::visit(const Task& task, unsigned self, Scratch& scratch) {
     }
 
     tree.add(task.dir, file_bytes);
+    tree.addInodes(task.dir, inodes);
 }

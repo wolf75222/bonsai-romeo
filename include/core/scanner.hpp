@@ -49,8 +49,25 @@ public:
 
     ScannerRemoveResult remove(const fs::path& path);
 
+    /* Metric
+    - What get() returns for a directory, and what the menu and the pie show.
+    - BYTES: total size. INODES: number of files and directories (what the GPFS file quota counts).
+    */
+    enum class Metric { BYTES, INODES };
+
+    void setMetric(Metric m) { metric = m; }
+    Metric getMetric() const { return metric; }
+
     uint64_t get(const fs::path& path);
     uint64_t getSnapped(const fs::path& path);
+    uint64_t getBytes(const fs::path& path);
+    uint64_t getInodes(const fs::path& path);
+
+    // Value of a non-directory entry for the current metric
+    uint64_t fileValue(const fs::directory_entry& entry);
+
+    // Formats a value of the current metric (1.20GiB / 1.5M)
+    std::string format(uint64_t value, const std::string& spacer = "");
 
     /* visible(entry)
     - Whether the menu and the pie show this entry.
@@ -68,6 +85,8 @@ private:
 
     // Set when the scan has completed, or to make it stop early
     std::atomic<bool> done{false};
+
+    std::atomic<Metric> metric{Metric::BYTES};
 
     // Only one thread writes the snapshot file at a time
     std::mutex snapshot_mutex;

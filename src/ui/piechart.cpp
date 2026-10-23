@@ -130,11 +130,7 @@ void BonsaiPie::collectEntries(const fs::path& dir, std::vector<EntryInfo>& entr
             size = scanner->get(entry.path());
 
         } else if (entry.is_regular_file(ec)) {
-            size = entry.file_size(ec);
-
-            // The file disappeared in the meantime
-            if (ec)
-                continue;
+            size = scanner->fileValue(entry);
 
         } else {
             continue;
@@ -496,7 +492,9 @@ Component BonsaiPie::pie(std::shared_ptr<AppData::BonsaiData> data, Scanner* sca
             }
 
             uint64_t current_size = scanner->get(current_path);
-            std::string label = FormatUtils::toReadable(current_size, " ");
+            std::string label = scanner->format(current_size, " ");
+            if (scanner->getMetric() == Scanner::Metric::INODES)
+                label += " files";
 
             // For some reason -4 centers text better
             c.DrawText((w / 2 - label.size() / 2) - 4, h / 2, label);

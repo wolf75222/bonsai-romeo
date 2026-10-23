@@ -45,6 +45,7 @@ public:
     struct Node {
         std::atomic<uint64_t> size{0};            // Bytes in this directory and everything below it
         std::atomic<uint64_t> snapped{0};         // Same, as saved by the previous run
+        std::atomic<uint64_t> inodes{0};          // Files and directories of the user below it (GPFS file quota)
         std::atomic<const Block*> children{nullptr}; // nullptr: not listed yet, or no sub-directories
         uint32_t parent = NONE;
         std::atomic<bool> removed{false};
@@ -68,6 +69,10 @@ public:
     // Adds / removes `bytes` on `dir` and on every directory above it.
     void add(uint32_t dir, uint64_t bytes);
     void subtract(uint32_t dir, uint64_t bytes);
+
+    // Same for the inode count
+    void addInodes(uint32_t dir, uint64_t count);
+    void subtractInodes(uint32_t dir, uint64_t count);
 
     // Resolves an absolute path to its node, or NONE if it isn't a (known) directory under the root.
     uint32_t find(std::string_view path) const;

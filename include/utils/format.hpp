@@ -33,6 +33,37 @@ public:
         return toReadable(bytes, "");
     }
 
+    // A count in a short format: 987, 12.3k, 1.50M
+    static std::string toCount(uintmax_t count, const std::string& spacer = "") {
+        std::ostringstream oss;
+        oss << std::fixed << std::setprecision(count >= 1'000'000 ? 2 : 1);
+
+        if (count >= 1'000'000'000)
+            oss << (double)count / 1e9 << spacer << "G";
+        else if (count >= 1'000'000)
+            oss << (double)count / 1e6 << spacer << "M";
+        else if (count >= 1'000)
+            oss << (double)count / 1e3 << spacer << "k";
+        else
+            oss << count;
+
+        return oss.str();
+    }
+
+    // A count with thousands separators: 1 496 302
+    static std::string withSeparators(uintmax_t count) {
+        std::string digits = std::to_string(count);
+        std::string out;
+
+        for (size_t i = 0; i < digits.size(); i++) {
+            if (i > 0 && (digits.size() - i) % 3 == 0)
+                out += ' ';
+            out += digits[i];
+        }
+
+        return out;
+    }
+
     static std::string trimSuffix(const std::string& str, size_t max_size, const std::string& suffix) {
         if (str.size() <= max_size)
             return str;

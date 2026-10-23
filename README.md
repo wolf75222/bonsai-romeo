@@ -10,38 +10,61 @@ What changes compared to upstream:
   for every project group you belong to (`id -Gn`). Everything else on GPFS is skipped.
 - **Only your files are counted and listed**: in shared `/project/<group>` folders, other
   members' files are invisible, and their folders only appear if they contain files of yours.
+- **Quota dashboard** (key `U`, or `bonsai-romeo --quota`): your GPFS quotas with gauges, for
+  space *and* number of files, same rules as ROMEO's `/apps/romeotools/myquotas.sh`.
+- **File-count mode** (key `F`): the sidebar and the pie show how many files/directories each
+  folder holds instead of its size, to find what eats your file quota.
 - **Deleting is limited to what you own**, inside your spaces.
-- `bonsai-romeo --summary [path]`: scan, print the size of each space, exit (no TUI, handy in a job).
+- `bonsai-romeo --summary [path]`: scan, print size and file count of each space, exit (no UI).
 - `BONSAI_ROOTS=dir1:dir2 bonsai-romeo` overrides the detected spaces.
 - Own config and cache (`~/.config/bonsai-romeo/`, `~/.cache/bonsai-romeo/`), no `xxd` needed to build.
-
-Sizes are apparent sizes (sum of file sizes), not the block usage reported by `mmlsquota`.
 
 > [!WARNING]
 > ROMEO has **no backups**: anything removed with `SUPPR` is gone for good.
 
-### Build on ROMEO
+### Install on ROMEO (any user)
+
+On a login node (`ssh romeo`):
 
 ```bash
-git clone https://github.com/wolf75222/bonsai-romeo.git ~/bonsai-romeo
-cd ~/bonsai-romeo
-romeo_load_x64cpu_env
-spack load cmake
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j8
-mkdir -p ~/.local/bin && cp build/bonsai-romeo ~/.local/bin/
+git clone https://github.com/wolf75222/bonsai-romeo.git ~/bonsai-romeo && ~/bonsai-romeo/install.sh
 ```
 
-The login nodes are x86_64, so this binary runs there directly. If `spack load cmake` matches
-several packages, pick one by hash (`spack find -l cmake`, then `spack load /<hash>`).
+`install.sh` takes `cmake` from Spack (`romeo_load_x64cpu_env`), builds with the system `g++`, and
+installs the binary in `~/.local/bin/bonsai-romeo` (already in your `PATH` on ROMEO). To update:
+`cd ~/bonsai-romeo && git pull && ./install.sh`. Once installed, `rm -rf ~/bonsai-romeo/build`
+frees the build files. The binary is x86_64: it runs on the login nodes and the `x64cpu` nodes.
 
 ### Run
 
 ```bash
 bonsai-romeo                       # all your spaces
 bonsai-romeo /project/r250127      # one project, only your files in it
-bonsai-romeo --summary             # sizes only, no UI
+bonsai-romeo --quota               # quotas only, no UI
+bonsai-romeo --summary             # sizes and file counts, no UI
 ```
+
+| Key | Action |
+|-----|--------|
+| `U` | quota dashboard / back to the pie chart |
+| `F` | switch between size and file count |
+| `R` | refresh the quotas |
+| `SUPPR` | delete the selected entry (yours only) |
+| `Q` | quit |
+
+### How quotas work on ROMEO
+
+- Each quota has two limits, for space and for files (inodes: every file or directory counts as one):
+  - **soft**: can be exceeded during a grace period (a few days); once it expires, writing is blocked
+    until you get back below it.
+  - **hard**: can never be exceeded.
+- `home` and `scratch` have a quota per user. `/project/<group>` has no limit per person: the
+  space is counted on the project group, shared by all its members.
+- Files you put in a project folder must belong to the project group. Files left with your
+  personal group (copied from elsewhere) aren't counted on the project and can make your writes
+  fail: the dashboard detects them and shows the `chgrp` commands to fix it.
+- The gauge is scaled to the hard limit, `|` marks the soft limit. Quota usage is counted in GPFS
+  blocks, while the explorer shows apparent sizes (sum of file sizes): the two can differ.
 
 A full scan walks GPFS metadata and can take a couple of minutes; sizes fill in live.
 

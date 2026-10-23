@@ -127,6 +127,23 @@ void DirTree::subtract(uint32_t dir, uint64_t bytes) {
     }
 }
 
+void DirTree::addInodes(uint32_t dir, uint64_t count) {
+    if (count == 0)
+        return;
+
+    for (uint32_t id = dir; id != NONE; id = node(id).parent)
+        node(id).inodes.fetch_add(count, std::memory_order_relaxed);
+}
+
+void DirTree::subtractInodes(uint32_t dir, uint64_t count) {
+    for (uint32_t id = dir; id != NONE; id = node(id).parent) {
+        auto& inodes = node(id).inodes;
+        uint64_t current = inodes.load(std::memory_order_relaxed);
+
+        while (!inodes.compare_exchange_weak(current, current > count ? current - count : 0)) {}
+    }
+}
+
 uint32_t DirTree::find(std::string_view path) const {
     if (path.size() < root.size() || path.compare(0, root.size(), root) != 0)
         return NONE;

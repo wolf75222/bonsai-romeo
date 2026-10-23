@@ -19,12 +19,14 @@ set(SRC
     src/core/app_data.cpp
     src/core/dir_tree.cpp
     src/core/scanner.cpp
+    src/core/quota.cpp
     src/core/walker.cpp
 
     src/ui/menu.cpp
     src/ui/modal_confirm.cpp
     src/ui/modal_error.cpp
     src/ui/piechart.cpp
+    src/ui/quota_view.cpp
 )
 
 # Embed default config

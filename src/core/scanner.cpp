@@ -2,6 +2,7 @@
 
 #include "../../include/config/config.hpp"
 #include "../../include/core/walker.hpp"
+#include "../../include/utils/format.hpp"
 
 #include <algorithm>
 #include <filesystem>
@@ -60,6 +61,10 @@ void Scanner::snapshot() {
 }
 
 uint64_t Scanner::get(const fs::path& path) {
+    return metric == Metric::INODES ? getInodes(path) : getBytes(path);
+}
+
+uint64_t Scanner::getBytes(const fs::path& path) {
     uint32_t id = tree.find(path.native());
 
     if (id != DirTree::NONE)
@@ -68,9 +73,31 @@ uint64_t Scanner::get(const fs::path& path) {
     return 0;
 }
 
+uint64_t Scanner::getInodes(const fs::path& path) {
+    uint32_t id = tree.find(path.native());
+
+    if (id != DirTree::NONE)
+        return tree.node(id).inodes.load(std::memory_order_relaxed);
+
+    return 0;
+}
+
+uint64_t Scanner::fileValue(const fs::directory_entry& entry) {
+    if (metric == Metric::INODES)
+        return 1;
+
+    std::error_code ec;
+    uint64_t size = entry.file_size(ec);
+    return ec ? 0 : size;
+}
+
+std::string Scanner::format(uint64_t value, const std::string& spacer) {
+    return metric == Metric::INODES ? FormatUtils::toCount(value, spacer) : FormatUtils::toReadable(value, spacer);
+}
+
 uint64_t Scanner::getSnapped(const fs::path& path) {
     auto config = Config::get();
-    if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES) return 0;
+    if(!config.ENABLE_FOLDER_SIZE_PERCENTAGES || metric == Metric::INODES) return 0;
 
     uint32_t id = tree.find(path.native());
 
@@ -91,7 +118,8 @@ bool Scanner::visible(const fs::directory_entry& entry) {
         if (id == DirTree::NONE)
             return false;
 
-        return tree.node(id).size.load(std::memory_order_relaxed) > 0 || scope.owns(entry.path());
+        const DirTree::Node& node = tree.node(id);
+        return node.size.load(std::memory_order_relaxed) > 0 || node.inodes.load(std::memory_order_relaxed) > 0 || scope.owns(entry.path());
     }
 
     return scope.relation(entry.path().native()) == UserScope::Relation::INSIDE
@@ -110,6 +138,7 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
     }
 
     uint64_t removed_size = 0;
+    uint64_t removed_inodes = 1;
     uint32_t removed_dir = DirTree::NONE;
 
     if(fs::is_directory(path)) {
@@ -117,6 +146,7 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
 
         if (removed_dir != DirTree::NONE) {
             removed_size = tree.node(removed_dir).size.load();
+            removed_inodes = tree.node(removed_dir).inodes.load();
         }
     } else {
         std::error_code ec;
@@ -142,6 +172,7 @@ Scanner::ScannerRemoveResult Scanner::remove(const fs::path& path) {
 
     if (parent != DirTree::NONE) {
         tree.subtract(parent, removed_size);
+        tree.subtractInodes(parent, removed_inodes);
     }
 
     if (removed_dir != DirTree::NONE) {

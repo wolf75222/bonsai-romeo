@@ -44,12 +44,7 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
                 item.is_dir = entry.is_directory();
 
                 if (!item.is_dir) {
-                    std::error_code ec;
-                    item.size = entry.file_size(ec);
-
-                    if (ec) {
-                        item.size = 0;
-                    }
+                    item.size = scanner->fileValue(entry);
                 } else {
                     item.size = scanner->get(entry.path());
                     item.snapped_size = scanner->getSnapped(entry.path());
@@ -113,7 +108,7 @@ void BonsaiMenu::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bons
     }
 }
 
-Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, int* selected, const fs::path& default_path, MenuOption options) {
+Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::BonsaiData> data, Scanner* scanner, int* selected, const fs::path& default_path, MenuOption options) {
 
     // Selected or unselected colors
     options.entries_option.animated_colors.foreground = AnimatedColorOption{
@@ -125,7 +120,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
     auto terminal_rows = std::make_shared<int>(Terminal::Size().dimy);
 
     // Plot the entry data on the menu in a nice way
-    options.entries_option.transform = [data, selected, terminal_rows](const EntryState& entry_state) {
+    options.entries_option.transform = [data, scanner, selected, terminal_rows](const EntryState& entry_state) {
         /* Performance:
         - FTXUI's Menu builds the element of every entry on every frame, not only of the ones on screen
         - With thousands of entries, building and laying out all these rows is what makes scrolling lag
@@ -197,7 +192,7 @@ Component BonsaiMenu::menu(ScreenInteractive* screen, std::shared_ptr<AppData::B
 
             hbox(
                 filler(),
-                text(item.label == ".." ? "" : FormatUtils::toReadableShort(item.size)) | color(Color::GrayDark)
+                text(item.label == ".." ? "" : scanner->format(item.size)) | color(Color::GrayDark)
             ) | size(WIDTH, EQUAL, Config::get().SIDEBAR_WIDTH * 0.2)
         });
 
