@@ -981,22 +981,22 @@ int main(int argc, char* argv[]) {
         const Scanner::Metric metric = scanner.getMetric();
         const AppData::Sort sort = data->sort.load();
 
-        /* Header: where the explorer is, then only what differs from the start (what F and S show) and the quota badge
+        /* Header: the title, with what F and S show when it isn't the usual, then where the explorer is
+        - At the top (your spaces) the list says it all: no path
         - What runs and what happened go at the bottom, the keys are in ? (one line of the main ones)
         */
-        const std::string here = scanner.isSpacesView(*data->path) ? "your spaces" : scope.display(*data->path);
+        const std::string here = scanner.isSpacesView(*data->path) ? "" : scope.display(*data->path);
         const size_t width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 2, 8));
 
         std::string shown;
-        if (metric == Scanner::Metric::DISK) shown += "disk ";
-        if (metric == Scanner::Metric::INODES) shown += "files ";
-        if (sort == AppData::Sort::NAME) shown += "by name ";
-        if (sort == AppData::Sort::AGE) shown += "oldest first ";
+        auto tag = [&shown](const char* what) { shown += (shown.empty() ? "" : ", ") + std::string(what); };
+        if (metric == Scanner::Metric::DISK) tag("disk");
+        if (metric == Scanner::Metric::INODES) tag("files");
+        if (sort == AppData::Sort::NAME) tag("by name");
+        if (sort == AppData::Sort::AGE) tag("oldest first");
 
-        const Quota::Report report = quotas.get();
-        const bool ready = quotas.ready();
-        const size_t taken = shown.size() + BonsaiQuotaView::badgeText(report, ready).size() + 2;
-        const size_t room = width > taken + 8 ? width - taken : 8;
+        // A quota needing attention turns the U of the keys line orange: the one place it shows
+        const bool quota_alert = !BonsaiQuotaView::badgeText(quotas.get(), quotas.ready()).empty();
 
         Elements bottom;
 
@@ -1023,16 +1023,18 @@ int main(int argc, char* argv[]) {
         }
 
         bottom.push_back(separator());
-        bottom.push_back(text(FormatUtils::trimSuffix(" ? keys  / find  C clean  U quota", width + 1, "")) | color(Color::GrayDark));
+        bottom.push_back(hbox({
+            text(" ? keys  / find  C clean  ") | color(Color::GrayDark),
+            text("U quota") | color(quota_alert ? Color::RGB(255, 140, 0) : Color::GrayDark),
+        }));
 
         Elements rows = {
+            text(" "),
             hbox({
-                text(" " + FormatUtils::trimMiddle(here, room)) | bold,
-                filler(),
-                text(shown) | color(Color::GrayDark),
-                BonsaiQuotaView::badge(report, ready),
-                text(" "),
-            }),
+                text("Explorer") | bold,
+                text(shown.empty() ? "" : " [" + shown + "]") | color(Color::GrayDark),
+            }) | center,
+            text(" " + FormatUtils::trimMiddle(here, width)) | color(Color::GrayLight),
             separator(),
             hbox({
                 menu_component->Render() | frame | flex,
