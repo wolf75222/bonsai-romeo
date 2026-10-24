@@ -2,7 +2,7 @@
 
 See what takes up **your** space on the [ROMEO](https://romeo.univ-reims.fr/) cluster (home, scratch, projects), check your quotas and clean up, from the terminal. A fork of [bonsai](https://github.com/orrnithogalum/bonsai) for ROMEO users.
 
-![bonsai-romeo exploring a home folder](img/explorer.png)
+![bonsai-romeo with made-up data](img/bonsai.gif)
 
 ## Install
 
@@ -55,6 +55,6 @@ bonsai-romeo --quota --json    # the same as JSON (also --summary, --cleanup)
 
 ## Docs
 
-[Usage](docs/usage.md) · [Quotas on ROMEO](docs/quotas.md) · [Configuration](docs/configuration.md) · [Terminals](docs/terminals.md) · [Changes from bonsai](docs/changes.md)
+[Usage](docs/usage.md) · [Quotas on ROMEO](docs/quotas.md) · [Configuration](docs/configuration.md) · [Terminals](docs/terminals.md) · [Changes from bonsai](docs/changes.md) · [Development](docs/development.md)
 
 GPL-3.0, like [bonsai](https://github.com/orrnithogalum/bonsai).

@@ -149,8 +149,8 @@ public:
         return std::find(roots.begin(), roots.end(), real) != roots.end();
     }
 
-    /* Short name of a space, for the pie: "home", "scratch", "r250127" (empty if `real` isn't a space)
-    - label() adds what it is for the sidebar: "home", "scratch", "project r250127"
+    /* Short name of a space, for the pie: "home", "scratch", "r12345" (empty if `real` isn't a space)
+    - label() adds what it is for the sidebar: "home", "scratch", "project r12345"
     */
     std::string shortName(const std::string& real) const {
         if (!isRoot(real))

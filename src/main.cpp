@@ -712,7 +712,7 @@ int main(int argc, char* argv[]) {
         return false;
     };
 
-    // What the marked entries hold, for the line under the list: worked out when the marks change (it stats them)
+    // What the marked entries hold, for the keys line: worked out when the marks change (it stats them)
     std::string marks_line;
     auto refreshMarks = [&] {
         marks_line.clear();
@@ -734,8 +734,8 @@ int main(int argc, char* argv[]) {
             files += f;
         }
 
-        marks_line = " " + std::to_string(data->marked.size()) + " marked: " + FormatUtils::toReadable(disk, " ") + ", "
-                   + FormatUtils::toCount(files) + " files  (D deletes, X clears)";
+        marks_line = std::to_string(data->marked.size()) + " marked: " + FormatUtils::toReadable(disk, " ") + ", "
+                   + FormatUtils::toCount(files) + " files";
     };
     marks_changed = refreshMarks;
 
@@ -994,14 +994,13 @@ int main(int argc, char* argv[]) {
 
     /* Explorer, on the left: the list in a panel (the look of RSV, see theme.hpp)
     - Its frame says what F and S show when it isn't the usual, then where the explorer is (nothing at the top)
-    - Under the list, only what concerns it: the marks, the folders that couldn't be read
+    - Under the list, only what concerns it: the folders that couldn't be read (the marks are on the keys line)
     */
     auto left = Renderer(menu_container, [&] {
         std::lock_guard<std::mutex> lock_m(data->menu_mutex);
 
         const Scanner::Metric metric = scanner.getMetric();
         const AppData::Sort sort = data->sort.load();
-        const size_t width = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 4, 8));
 
         std::string shown;
         auto tag = [&shown](const char* what) { shown += (shown.empty() ? "" : ", ") + std::string(what); };
@@ -1016,10 +1015,6 @@ int main(int argc, char* argv[]) {
         const size_t room = static_cast<size_t>(std::max(config.SIDEBAR_WIDTH - 16, 4));
 
         Elements rows = {menu_component->Render() | frame | flex};
-
-        // Marked entries (SPACE): what D would delete
-        if (!marks_line.empty())
-            rows.push_back(text(FormatUtils::trimSuffix(marks_line, width + 1, "...")) | color(ui::theme::yellow()));
 
         // Folders that couldn't be read: the sizes above them may be low
         if (const uint32_t errors = scanner.readErrorCount(); errors > 0)
@@ -1475,6 +1470,21 @@ int main(int argc, char* argv[]) {
                          text("  "), ui::keyHint("p", "show")});
         } else if (!notice.empty() && std::chrono::steady_clock::now() < notice_until) {
             keys = hbox({text(" "), text(FormatUtils::trimMiddle(notice, static_cast<size_t>(std::max(columns - 2, 8)))) | color(ui::theme::green())});
+        } else if (!marks_line.empty()) {
+            // Entries marked with SPACE, as in RSV: what they hold, and what can be done with them
+            static const std::vector<std::pair<std::string, std::string>> marked_keys = {
+                {"d", "delete"}, {"space", "mark"}, {"*", "all"}, {"x", "clear"}, {"?", "help"}, {"q", "quit"}};
+            const std::string head = " " + FormatUtils::trimMiddle(marks_line, static_cast<size_t>(std::max(columns - 4, 8))) + "  ";
+            Elements hints = {text(head) | bold | color(ui::theme::yellow())};
+            int used = static_cast<int>(head.size());
+            for (const auto& [key, label] : marked_keys) {
+                const int w = static_cast<int>(key.size() + 1 + label.size() + 2);
+                if (used + w > columns)
+                    break;
+                hints.push_back(ui::keyHint(key, label));
+                used += w;
+            }
+            keys = hbox(std::move(hints));
         } else {
             // A quota needing attention turns its key yellow (red once writing is blocked)
             const Quota::Report report = quotas.get();

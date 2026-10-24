@@ -66,7 +66,7 @@ The cards of your spaces are numbered: `1` to `9` opens that space in the explor
 
 `D` (or `fn` + `⌫`, which sends `SUPPR`) asks first, showing the path, size and file count. The dialog starts on **cancel**: `RIGHT` then `ENTER` deletes. It only deletes your own files inside your spaces, never a whole space. Big folders are deleted in the background, and deleting works while the scan runs.
 
-`SPACE` marks the selected entry (in any folder) and moves to the next one, `*` marks every entry of the folder shown: `D` then deletes every marked entry at once, after one dialog with their total. `X` clears the marks.
+`SPACE` marks the selected entry (in any folder) and moves to the next one, `*` marks every entry of the folder shown: `D` then deletes every marked entry at once, after one dialog with their total. While entries are marked, the keys line says how many and what they hold. `X` clears the marks.
 
 A folder is deleted on 16 threads, one folder each: GPFS takes a moment per file, and one at a time a million files took more than twenty minutes. On ROMEO, 100,000 files go in about 6 seconds (`rm -rf`: about 15).
 

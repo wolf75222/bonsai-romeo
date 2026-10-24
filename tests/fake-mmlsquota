@@ -1,0 +1,23 @@
+#!/bin/bash
+# Made-up quotas for screenshots and tests: same output format as "mmlsquota -Y"
+# Only made-up names come out: the project groups asked for get r12345 and r67890, any other group nothing
+H="mmlsquota:user:HEADER:version:reserved:reserved:filesystemName:quotaType:id:name:blockUsage:blockQuota:blockLimit:blockInDoubt:blockGrace:filesUsage:filesQuota:filesLimit:filesInDoubt:filesGrace:remarks:fid:filesetname:"
+G="mmlsquota:group:HEADER:version:reserved:reserved:filesystemName:quotaType:id:name:blockUsage:blockQuota:blockLimit:blockInDoubt:blockGrace:filesUsage:filesQuota:filesLimit:filesInDoubt:filesGrace:remarks:fid:filesetname:"
+case "$*" in
+  "-Y gpfs")
+    echo "$H"
+    echo "mmlsquota:user:0:1:::gpfs:USR:1000:user:13002342:104857600:110100480:0:none:210532:1000000:1500000:0:none:demo:1:home:"
+    echo "mmlsquota:user:0:1:::gpfs:USR:1000:user:64172851:104857600:110100480:0:none:1120004:1000000:1500000:0:4 days:demo:2:scratch:"
+    echo "mmlsquota:user:0:1:::gpfs:USR:1000:user:188743680:0:0:0:none:2104532:0:0:0:none:demo:3:projet:" ;;
+  *)
+    echo "$G"
+    g=$3   # -Y -g <group> gpfs
+    case "$g" in r[0-9][0-9]*) ;; *) exit 0 ;; esac
+    # Its rank among the project groups asked about: the first one is r12345, the second r67890
+    rank=$(id -Gn | tr ' ' '\n' | grep -E '^r[0-9]{2,}$' | grep -nx "$g" | cut -d: -f1)
+    if [ "$rank" = 1 ]; then
+      echo "mmlsquota:group:0:1:::gpfs:GRP:2001:r12345:223346688:314572800:319815680:0:none:2104532:10000000:15000000:0:none:demo:3:projet:"
+    elif [ "$rank" = 2 ]; then
+      echo "mmlsquota:group:0:1:::gpfs:GRP:2002:r67890:2202009:15728640:20971520:0:none:3200:1000000:1500000:0:none:demo:3:projet:"
+    fi ;;
+esac

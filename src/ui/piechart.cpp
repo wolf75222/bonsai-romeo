@@ -483,7 +483,7 @@ void BonsaiPie::worker(ScreenInteractive* screen, std::shared_ptr<AppData::Bonsa
             slice.text_color = text_color;
             slice.inner_radius = inner_radius;
             slice.outer_radius = outer_radius;
-            // A space is named after what it is: "home", "scratch", "r250127" (its folder is just the user's name)
+            // A space is named after what it is: "home", "scratch", "r12345" (its folder is just the user's name)
             const std::string space = scanner->getScope().shortName(entry.path.string());
             slice.label = space.empty() ? entry.path.filename().string() : space;
             slice.sweep = sweep;
